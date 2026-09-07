@@ -32,6 +32,7 @@ model Organization {
   products     Product[]
   postMappings PostMapping[]
   interactions InteractionLog[]
+  rules        AutomationRule[]
 }
 
 model OrganizationMember {
@@ -54,11 +55,27 @@ model Channel {
   channelIdentifier    String
   name                 String
   accessTokenEncrypted String
+  permissions          String[]     @default([])
+  tokenExpiresAt       DateTime?
+  metadata             Json?
   isActive             Boolean      @default(true)
   createdAt            DateTime     @default(now())
   updatedAt            DateTime     @updatedAt
 
   @@unique([orgId, channelIdentifier])
+}
+
+model AutomationRule {
+  id          String       @id @default(uuid())
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  name        String
+  triggerType String
+  keywords    String[]     @default([])
+  actions     Json
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
 }
 
 model Product {

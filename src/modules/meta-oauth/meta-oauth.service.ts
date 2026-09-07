@@ -1,4 +1,4 @@
-﻿import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 
@@ -82,6 +82,9 @@ export class MetaOAuthService {
       channelIdentifier: string;
       name: string;
       accessToken: string;
+      permissions?: string[];
+      tokenExpiresAt?: Date;
+      metadata?: any;
     },
   ) {
     const encryptedToken = this.crypto.encrypt(payload.accessToken);
@@ -95,6 +98,9 @@ export class MetaOAuthService {
       update: {
         name: payload.name,
         accessTokenEncrypted: encryptedToken,
+        permissions: payload.permissions || [],
+        tokenExpiresAt: payload.tokenExpiresAt,
+        metadata: payload.metadata,
         isActive: true,
       },
       create: {
@@ -103,6 +109,9 @@ export class MetaOAuthService {
         channelIdentifier: payload.channelIdentifier,
         name: payload.name,
         accessTokenEncrypted: encryptedToken,
+        permissions: payload.permissions || [],
+        tokenExpiresAt: payload.tokenExpiresAt,
+        metadata: payload.metadata,
         isActive: true,
       },
     });
@@ -118,8 +127,80 @@ export class MetaOAuthService {
       platform: c.platform,
       channelIdentifier: c.channelIdentifier,
       name: c.name,
+      permissions: c.permissions,
+      tokenExpiresAt: c.tokenExpiresAt,
+      metadata: c.metadata,
       isActive: c.isActive,
       createdAt: c.createdAt,
     }));
   }
+
+  async auditChannelsHealth(orgId?: string) {
+    const channels = await this.prisma.channel.findMany({
+      where: orgId ? { orgId } : {},
+      include: { org: true },
+    });
+
+    const identifierCounts = new Map<string, number>();
+    for (const c of channels) {
+      identifierCounts.set(c.channelIdentifier, (identifierCounts.get(c.channelIdentifier) || 0) + 1);
+    }
+
+    const REQUIRED_BY_PLATFORM: Record<string, string[]> = {
+      FACEBOOK: ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts', 'pages_messaging'],
+      INSTAGRAM: ['instagram_basic', 'instagram_manage_comments', 'instagram_manage_messages'],
+      WHATSAPP: ['whatsapp_business_messaging', 'whatsapp_business_management'],
+    };
+
+    let healthyCount = 0;
+    let collisionRisk = false;
+
+    const audited = channels.map((c) => {
+      let tokenStatus = 'VALID';
+      try {
+        const decrypted = this.crypto.decrypt(c.accessTokenEncrypted);
+        if (!decrypted) tokenStatus = 'DECRYPT_FAIL';
+      } catch {
+        tokenStatus = 'DECRYPT_FAIL';
+      }
+
+      if (c.tokenExpiresAt && new Date(c.tokenExpiresAt) < new Date()) {
+        tokenStatus = 'EXPIRED';
+      }
+
+      const count = identifierCounts.get(c.channelIdentifier) || 1;
+      const isCollisionFree = count === 1;
+      if (!isCollisionFree) collisionRisk = true;
+
+      const requiredScopes = REQUIRED_BY_PLATFORM[c.platform] || [];
+      const currentScopes = c.permissions || [];
+      const missingScopes = requiredScopes.filter((s) => !currentScopes.includes(s));
+
+      const isHealthy = tokenStatus === 'VALID' && isCollisionFree && missingScopes.length === 0;
+      if (isHealthy) healthyCount++;
+
+      return {
+        id: c.id,
+        orgId: c.orgId,
+        orgName: c.org?.name || 'Unknown',
+        platform: c.platform,
+        name: c.name,
+        identifier: c.channelIdentifier,
+        tokenStatus,
+        isCollisionFree,
+        activeScopes: currentScopes,
+        missingScopes,
+        isHealthy,
+      };
+    });
+
+    return {
+      totalChannels: channels.length,
+      healthyChannels: healthyCount,
+      collisionRiskDetected: collisionRisk,
+      auditTimestamp: new Date().toISOString(),
+      channels: audited,
+    };
+  }
 }
+

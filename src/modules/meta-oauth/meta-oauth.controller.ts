@@ -1,4 +1,4 @@
-﻿import { Controller, Post, Get, Body, Query, HttpStatus, HttpException } from '@nestjs/common';
+import { Controller, Post, Get, Body, Query, HttpStatus, HttpException } from '@nestjs/common';
 import { MetaOAuthService } from './meta-oauth.service';
 
 @Controller('api/meta')
@@ -48,5 +48,11 @@ export class MetaOAuthController {
     }
     const channels = await this.metaOAuth.listChannels(orgId);
     return { channels };
+  }
+
+  @Get('health-audit')
+  async auditHealth(@Query('org_id') orgId?: string) {
+    const report = await this.metaOAuth.auditChannelsHealth(orgId);
+    return report;
   }
 }
