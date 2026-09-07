@@ -1,5 +1,7 @@
 ﻿import { Injectable, Logger } from '@nestjs/common';
 import * as crypto from 'crypto';
+import { PrismaService } from '../../prisma/prisma.service';
+import { CryptoService } from '../crypto/crypto.service';
 import { AiClientService } from '../ai-client/ai-client.service';
 import { MetaPublisherService } from '../meta-publisher/meta-publisher.service';
 
@@ -10,6 +12,8 @@ export class WebhookService {
   private readonly verifyToken = process.env.META_VERIFY_TOKEN || 'reel2real_verify_secret';
 
   constructor(
+    private readonly prisma: PrismaService,
+    private readonly crypto: CryptoService,
     private readonly aiClient: AiClientService,
     private readonly metaPublisher: MetaPublisherService,
   ) {}
@@ -25,7 +29,7 @@ export class WebhookService {
 
   verifySignature(signatureHeader: string | undefined, rawPayload: string): boolean {
     if (!this.appSecret) {
-      return true; // Dev mode without secret
+      return true; // Dev mode
     }
     if (!signatureHeader || !signatureHeader.startsWith('sha256=')) {
       return false;
@@ -36,23 +40,57 @@ export class WebhookService {
   }
 
   async processWebhookEvent(payload: any) {
-    this.logger.log(`Received webhook event: ${JSON.stringify(payload).substring(0, 200)}...`);
+    this.logger.log(`Inbound webhook object: ${payload.object}`);
 
-    // Extract Instagram comment or message
-    if (payload.object === 'instagram' && payload.entry) {
-      for (const entry of payload.entry) {
-        if (entry.changes) {
-          for (const change of entry.changes) {
-            if (change.field === 'comments') {
-              await this.handleInstagramComment(change.value);
-            }
+    if (!payload.entry || !Array.isArray(payload.entry)) return;
+
+    for (const entry of payload.entry) {
+      const entryId = entry.id; // Facebook Page ID or Instagram Account ID
+      this.logger.log(`Extracting event for Channel Identifier: ${entryId}`);
+
+      // Multi-tenant Channel Lookup
+      const channel = await this.prisma.channel.findFirst({
+        where: { channelIdentifier: entryId, isActive: true },
+        include: { org: true },
+      });
+
+      const brandId = channel ? channel.orgId : 'default_brand';
+      const brandName = channel?.org?.name || 'Reel2Real Brand';
+      let decryptedToken = 'mock_token';
+
+      if (channel?.accessTokenEncrypted) {
+        try {
+          decryptedToken = this.crypto.decrypt(channel.accessTokenEncrypted);
+        } catch (e: any) {
+          this.logger.error(`Failed to decrypt token for channel ${channel.id}: ${e.message}`);
+        }
+      }
+
+      // Handle Instagram Comments / Changes
+      if (entry.changes) {
+        for (const change of entry.changes) {
+          if (change.field === 'comments') {
+            await this.handleComment(change.value, brandId, brandName, decryptedToken, channel?.orgId);
           }
+        }
+      }
+
+      // Handle Messaging / DMs
+      if (entry.messaging) {
+        for (const msg of entry.messaging) {
+          await this.handleMessage(msg, brandId, brandName, decryptedToken, channel?.orgId);
         }
       }
     }
   }
 
-  private async handleInstagramComment(commentData: any) {
+  private async handleComment(
+    commentData: any,
+    brandId: string,
+    brandName: string,
+    accessToken: string,
+    orgId?: string,
+  ) {
     const commentId = commentData.id;
     const text = commentData.text;
     const senderId = commentData.from?.id;
@@ -60,10 +98,10 @@ export class WebhookService {
 
     if (!text || !commentId) return;
 
-    this.logger.log(`Processing comment ${commentId}: "${text}" on media ${mediaId}`);
+    this.logger.log(`Processing comment [${commentId}] on Brand: ${brandName}`);
 
     const aiResponse = await this.aiClient.generateReply({
-      brand_id: 'default_brand',
+      brand_id: brandId,
       channel_type: 'instagram',
       event_type: 'comment',
       message_text: text,
@@ -71,14 +109,81 @@ export class WebhookService {
       post_context: {
         post_id: mediaId || '',
       },
+      brand_persona: {
+        brand_name: brandName,
+      },
     });
 
     if (aiResponse.public_reply) {
-      await this.metaPublisher.replyToComment(commentId, aiResponse.public_reply, 'mock_token');
+      await this.metaPublisher.replyToComment(commentId, aiResponse.public_reply, accessToken);
     }
 
     if (aiResponse.private_dm && senderId) {
-      await this.metaPublisher.sendPrivateDm(senderId, aiResponse.private_dm, 'mock_token');
+      await this.metaPublisher.sendPrivateDm(senderId, aiResponse.private_dm, accessToken);
+    }
+
+    // Persist interaction log to Supabase
+    if (orgId) {
+      await this.prisma.interactionLog.create({
+        data: {
+          orgId,
+          channelType: 'INSTAGRAM',
+          eventType: 'COMMENT',
+          inboundMessage: text,
+          senderId: senderId || 'anonymous',
+          publicReply: aiResponse.public_reply,
+          privateDm: aiResponse.private_dm,
+          intent: aiResponse.intent,
+          sentiment: aiResponse.sentiment,
+          requiresHuman: aiResponse.requires_human_attention,
+        },
+      }).catch((e) => this.logger.error(`Failed to log interaction: ${e.message}`));
+    }
+  }
+
+  private async handleMessage(
+    messageData: any,
+    brandId: string,
+    brandName: string,
+    accessToken: string,
+    orgId?: string,
+  ) {
+    const text = messageData.message?.text;
+    const senderId = messageData.sender?.id;
+
+    if (!text || !senderId) return;
+
+    this.logger.log(`Processing DM from [${senderId}] on Brand: ${brandName}`);
+
+    const aiResponse = await this.aiClient.generateReply({
+      brand_id: brandId,
+      channel_type: 'instagram',
+      event_type: 'dm',
+      message_text: text,
+      sender_id: senderId,
+      brand_persona: {
+        brand_name: brandName,
+      },
+    });
+
+    if (aiResponse.private_dm) {
+      await this.metaPublisher.sendPrivateDm(senderId, aiResponse.private_dm, accessToken);
+    }
+
+    if (orgId) {
+      await this.prisma.interactionLog.create({
+        data: {
+          orgId,
+          channelType: 'INSTAGRAM',
+          eventType: 'DM',
+          inboundMessage: text,
+          senderId,
+          privateDm: aiResponse.private_dm,
+          intent: aiResponse.intent,
+          sentiment: aiResponse.sentiment,
+          requiresHuman: aiResponse.requires_human_attention,
+        },
+      }).catch((e) => this.logger.error(`Failed to log interaction: ${e.message}`));
     }
   }
 
