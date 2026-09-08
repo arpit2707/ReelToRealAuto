@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 
@@ -14,7 +14,7 @@ export interface DiscoveredPage {
 }
 
 @Injectable()
-export class MetaOAuthService {
+export class MetaOAuthService implements OnModuleInit {
   private readonly logger = new Logger(MetaOAuthService.name);
   private readonly appId = process.env.META_APP_ID || '';
   private readonly appSecret = process.env.META_APP_SECRET || '';
@@ -23,6 +23,48 @@ export class MetaOAuthService {
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
   ) {}
+
+  async onModuleInit() {
+    await this.seedEnvChannels();
+  }
+
+  async seedEnvChannels() {
+    try {
+      const defaultOrg = await this.prisma.organization.upsert({
+        where: { slug: 'default-org' },
+        update: {},
+        create: {
+          id: 'org_default',
+          name: 'Primary Merchant Org',
+          slug: 'default-org',
+        },
+      });
+
+      if (process.env.PAGE_ID_MEME_WORLD && process.env.PAGE_TOKEN_MEME_WORLD) {
+        await this.connectChannel(defaultOrg.id, {
+          platform: 'FACEBOOK',
+          channelIdentifier: process.env.PAGE_ID_MEME_WORLD,
+          name: 'Meme World Official',
+          accessToken: process.env.PAGE_TOKEN_MEME_WORLD,
+          permissions: ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts', 'pages_messaging', 'pages_manage_metadata'],
+        });
+        this.logger.log(`Synced Page Meme World (${process.env.PAGE_ID_MEME_WORLD}) to Supabase Channel Vault`);
+      }
+
+      if (process.env.PAGE_ID_DESI_MEME_FACTORY && process.env.PAGE_TOKEN_DESI_MEME_FACTORY) {
+        await this.connectChannel(defaultOrg.id, {
+          platform: 'FACEBOOK',
+          channelIdentifier: process.env.PAGE_ID_DESI_MEME_FACTORY,
+          name: 'Desi Meme Factory',
+          accessToken: process.env.PAGE_TOKEN_DESI_MEME_FACTORY,
+          permissions: ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts', 'pages_messaging', 'pages_manage_metadata'],
+        });
+        this.logger.log(`Synced Page Desi Meme Factory (${process.env.PAGE_ID_DESI_MEME_FACTORY}) to Supabase Channel Vault`);
+      }
+    } catch (err: any) {
+      this.logger.warn(`Could not seed env channels: ${err.message}`);
+    }
+  }
 
   async exchangeForLongLivedToken(shortLivedToken: string): Promise<string> {
     if (!this.appId || !this.appSecret || shortLivedToken.startsWith('mock_')) {
@@ -87,11 +129,24 @@ export class MetaOAuthService {
       metadata?: any;
     },
   ) {
+    // Ensure organization exists
+    const cleanOrgId = orgId || 'org_default';
+    const slug = cleanOrgId.toLowerCase().replace(/[^a-z0-9]/g, '-');
+    await this.prisma.organization.upsert({
+      where: { slug },
+      update: {},
+      create: {
+        id: cleanOrgId,
+        name: cleanOrgId === 'org_default' ? 'Primary Merchant Org' : cleanOrgId,
+        slug,
+      },
+    });
+
     const encryptedToken = this.crypto.encrypt(payload.accessToken);
     return await this.prisma.channel.upsert({
       where: {
         orgId_channelIdentifier: {
-          orgId,
+          orgId: cleanOrgId,
           channelIdentifier: payload.channelIdentifier,
         },
       },
