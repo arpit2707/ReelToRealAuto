@@ -14,6 +14,7 @@ import { InboxModule } from './modules/inbox/inbox.module';
 
 import { ConversationModule } from './modules/conversations/conversation.module';
 import { ChannelConnectModule } from './modules/channels/channel-connect.module';
+import { WorkspaceModule } from './modules/workspace/workspace.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { ChannelConnectModule } from './modules/channels/channel-connect.module'
     InboxModule,
     ConversationModule,
     ChannelConnectModule,
+    WorkspaceModule,
   ],
   controllers: [AppController],
   providers: [AppService],
