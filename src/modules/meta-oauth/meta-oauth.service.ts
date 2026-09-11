@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 
@@ -188,7 +188,11 @@ export class MetaOAuthService implements OnModuleInit {
       },
     });
     if (existing && existing.orgId !== cleanOrgId) {
-      throw new Error('This Meta asset is already connected to another workspace');
+      // A plain Error surfaces as an opaque 500. This is a conflict the caller
+      // can act on, so name the asset and return 409.
+      throw new ConflictException(
+        `"${existing.name}" is already connected to another workspace. Disconnect it there first.`,
+      );
     }
 
     return await this.prisma.channel.upsert({

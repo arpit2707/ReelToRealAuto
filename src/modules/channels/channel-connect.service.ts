@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit, UnauthorizedExceptio
 import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
-import { MetaOAuthService } from '../meta-oauth/meta-oauth.service';
+import { MetaOAuthService, type DiscoveredPage } from '../meta-oauth/meta-oauth.service';
 import { facebookDialogUrl, graphUrl, appsecretProof, graphVersion } from '../../common/graph';
 
 type ConnectProvider = 'facebook' | 'instagram' | 'whatsapp';
@@ -198,11 +198,41 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
     const userToken = this.crypto.decrypt(connection.userTokenEncrypted);
     const pages = connection.provider === 'WHATSAPP_ESU' ? [] : await this.metaOAuth.fetchUserPages(userToken);
     const created = [];
+    // One bad asset used to abort the whole batch, discarding the channels that
+    // had already connected and surfacing as a single opaque error. Each
+    // selection is now independent, and the caller gets both lists back.
+    const failed: Array<{ platform: string; id: string; reason: string }> = [];
 
     for (const item of selection) {
+      try {
+        await this.connectOne(item, { orgId, connectionId, pages, userToken, created });
+      } catch (error: any) {
+        this.logger.warn(`Could not connect ${item.platform} ${item.id}: ${error?.message}`);
+        failed.push({
+          platform: item.platform,
+          id: item.id,
+          reason: error?.response?.message || error?.message || 'Could not connect this asset',
+        });
+      }
+    }
+    return { connected: created.length, channels: created, failed };
+  }
+
+  private async connectOne(
+    item: { platform: 'FACEBOOK' | 'INSTAGRAM' | 'WHATSAPP'; id: string; name?: string; wabaId?: string },
+    ctx: {
+      orgId: string;
+      connectionId: string;
+      pages: DiscoveredPage[];
+      userToken: string;
+      created: any[];
+    },
+  ) {
+    const { orgId, connectionId, pages, userToken, created } = ctx;
+    {
       if (item.platform === 'FACEBOOK') {
         const page = pages.find((p) => p.id === item.id);
-        if (!page?.access_token) continue;
+        if (!page?.access_token) return;
         const channel = await this.metaOAuth.connectChannel(orgId, {
           platform: 'FACEBOOK',
           channelIdentifier: page.id,
@@ -222,7 +252,7 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
       }
       if (item.platform === 'INSTAGRAM') {
         const page = pages.find((p) => p.instagram_business_account?.id === item.id);
-        if (!page?.access_token || !page.instagram_business_account) continue;
+        if (!page?.access_token || !page.instagram_business_account) return;
         const channel = await this.metaOAuth.connectChannel(orgId, {
           platform: 'INSTAGRAM',
           channelIdentifier: page.instagram_business_account.id,
@@ -259,7 +289,6 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
         created.push(channel);
       }
     }
-    return { connected: created.length, channels: created };
   }
 
   private async exchangeCode(code: string) {
