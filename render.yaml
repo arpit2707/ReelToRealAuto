@@ -2,7 +2,7 @@ services:
   - type: web
     name: reel2real-api
     runtime: node
-    plan: starter
+    plan: free
     region: singapore
     branch: main
     buildCommand: npm ci && npx prisma generate && npm run build
