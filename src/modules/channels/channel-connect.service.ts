@@ -70,12 +70,18 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
 
 
   // Meta rejects the whole dialog with "Invalid Scopes" if the app asks for a
-  // permission no enabled use case grants, so every name here is verified
-  // against the OAuth dialog. The Instagram permissions come from the
-  // "Manage messaging & content on Instagram" use case (API setup with
-  // Facebook login), and business_management is required alongside them.
-  // Note the permission is instagram_content_publishing, not ..._publish.
-  // META_SCOPES_* allow tuning without a redeploy.
+  // permission the app does not hold, so every name here was checked against
+  // the live OAuth dialog and the use case's permissions table.
+  //
+  // instagram_manage_comments is deliberately absent: unlike the others it has
+  // no Standard Access tier for this app, so it cannot be requested until App
+  // Review grants Advanced Access. Asking for it fails the entire dialog, which
+  // takes the Page permissions down with it. Add it via META_SCOPES_FACEBOOK
+  // once the review is approved.
+  //
+  // business_management is required alongside the Instagram permissions, which
+  // come from the "Manage messaging & content on Instagram" use case
+  // (API setup with Facebook login).
   private scopesFor(provider: ConnectProvider) {
     const override =
       provider === 'whatsapp'
@@ -95,9 +101,8 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
         'pages_read_engagement',
         'business_management',
         'instagram_basic',
-        'instagram_manage_comments',
         'instagram_manage_messages',
-        'instagram_content_publishing',
+        'instagram_content_publish',
       ].join(',');
     }
     return [
@@ -109,7 +114,6 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
       'pages_manage_posts',
       'business_management',
       'instagram_basic',
-      'instagram_manage_comments',
       'instagram_manage_messages',
     ].join(',');
   }
