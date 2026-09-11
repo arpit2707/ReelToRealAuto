@@ -62,23 +62,44 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
       provider === 'whatsapp' ? process.env.META_WA_ESU_CONFIG_ID : process.env.META_FB_LOGIN_CONFIG_ID;
     if (configId) {
       params.set('config_id', configId);
-    } else if (provider === 'whatsapp') {
-      params.set(
-        'scope',
-        'business_management,whatsapp_business_management,whatsapp_business_messaging',
-      );
-    } else if (provider === 'instagram') {
-      params.set(
-        'scope',
-        'pages_show_list,pages_manage_metadata,instagram_basic,instagram_manage_comments,instagram_manage_messages,instagram_content_publish',
-      );
     } else {
-      params.set(
-        'scope',
-        'pages_show_list,pages_messaging,pages_manage_metadata,pages_read_engagement,pages_manage_engagement,pages_manage_posts,instagram_basic,instagram_manage_comments,instagram_manage_messages',
-      );
+      params.set('scope', this.scopesFor(provider));
     }
     return `${facebookDialogUrl()}?${params.toString()}`;
+  }
+
+
+  // Meta rejects the whole dialog with "Invalid Scopes" if the app asks for a
+  // permission no enabled use case grants. instagram_manage_comments,
+  // instagram_manage_messages and instagram_content_publish need the
+  // "Manage messaging & content on Instagram" use case added to the app —
+  // until then they are left out so the rest of the connect flow still works.
+  // Once that use case is enabled, add them back through the env override
+  // below rather than editing this list.
+  private scopesFor(provider: ConnectProvider) {
+    const override =
+      provider === 'whatsapp'
+        ? process.env.META_SCOPES_WHATSAPP
+        : provider === 'instagram'
+          ? process.env.META_SCOPES_INSTAGRAM
+          : process.env.META_SCOPES_FACEBOOK;
+    if (override?.trim()) return override.trim();
+
+    if (provider === 'whatsapp') {
+      return 'business_management,whatsapp_business_management,whatsapp_business_messaging';
+    }
+    if (provider === 'instagram') {
+      return 'pages_show_list,pages_manage_metadata,instagram_basic';
+    }
+    return [
+      'pages_show_list',
+      'pages_messaging',
+      'pages_manage_metadata',
+      'pages_read_engagement',
+      'pages_manage_engagement',
+      'pages_manage_posts',
+      'instagram_basic',
+    ].join(',');
   }
 
   async handleCallback(code?: string, state?: string) {
