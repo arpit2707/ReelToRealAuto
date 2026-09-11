@@ -5,13 +5,13 @@ export class MetaPublisherService {
   private readonly logger = new Logger(MetaPublisherService.name);
 
   async replyToComment(commentId: string, message: string, accessToken: string): Promise<boolean> {
-    if (!accessToken || accessToken === 'mock_token') {
-      this.logger.log(`[SIMULATION MODE] Would post reply to comment ${commentId}: "${message}"`);
-      return true;
+    if (!accessToken || accessToken === 'mock_token' || accessToken.startsWith('mock_')) {
+      this.logger.warn(`Refusing to post comment reply without a real access token`);
+      return false;
     }
 
     try {
-      const url = `https://graph.facebook.com/v19.0/${commentId}/replies`;
+      const url = `https://graph.facebook.com/${process.env.META_GRAPH_VERSION || 'v24.0'}/${commentId}/replies`;
       const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -33,13 +33,13 @@ export class MetaPublisherService {
   }
 
   async sendPrivateDm(recipientId: string, message: string, accessToken: string): Promise<boolean> {
-    if (!accessToken || accessToken === 'mock_token') {
-      this.logger.log(`[SIMULATION MODE] Would send private DM to ${recipientId}: "${message}"`);
-      return true;
+    if (!accessToken || accessToken === 'mock_token' || accessToken.startsWith('mock_')) {
+      this.logger.warn(`Refusing to send private DM without a real access token`);
+      return false;
     }
 
     try {
-      const url = `https://graph.facebook.com/v19.0/me/messages`;
+      const url = `https://graph.facebook.com/${process.env.META_GRAPH_VERSION || 'v24.0'}/me/messages`;
       const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -69,12 +69,12 @@ export class MetaPublisherService {
 
   async sendFacebookMessengerDm(pageId: string, recipientId: string, message: string, accessToken: string): Promise<boolean> {
     if (!accessToken || accessToken === 'mock_token' || accessToken.startsWith('mock_')) {
-      this.logger.log(`[SIMULATION MODE] Would send Messenger DM to ${recipientId} from Page ${pageId}: "${message}"`);
-      return true;
+      this.logger.warn(`Refusing to send Messenger DM without a real access token`);
+      return false;
     }
 
     try {
-      const url = `https://graph.facebook.com/v19.0/me/messages`;
+      const url = `https://graph.facebook.com/${process.env.META_GRAPH_VERSION || 'v24.0'}/me/messages`;
       const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -106,12 +106,12 @@ export class MetaPublisherService {
     checkoutUrl?: string,
   ): Promise<boolean> {
     if (!accessToken || accessToken === 'mock_token' || accessToken.startsWith('mock_')) {
-      this.logger.log(`[SIMULATION MODE] Would send WhatsApp message from PhoneID ${phoneNumberId} to ${toWaId}: "${message}" (Checkout: ${checkoutUrl || 'N/A'})`);
-      return true;
+      this.logger.warn(`Refusing to send WhatsApp message without a real access token`);
+      return false;
     }
 
     try {
-      const url = `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`;
+      const url = `https://graph.facebook.com/${process.env.META_GRAPH_VERSION || 'v24.0'}/${phoneNumberId}/messages`;
       let bodyPayload: any;
 
       if (checkoutUrl) {
@@ -160,6 +160,111 @@ export class MetaPublisherService {
       return true;
     } catch (err: any) {
       this.logger.error(`Error in sendWhatsAppMessage: ${err.message}`);
+      return false;
+    }
+  }
+
+  async sendInteractiveButtonMessage(
+    phoneNumberId: string,
+    toWaId: string,
+    headerText: string,
+    bodyText: string,
+    footerText: string,
+    buttons: Array<{ id: string; title: string }>,
+    accessToken: string,
+  ): Promise<boolean> {
+    if (!accessToken || accessToken === 'mock_token' || accessToken.startsWith('mock_')) {
+      this.logger.warn(`Refusing to send interactive WhatsApp buttons without a real access token`);
+      return false;
+    }
+
+    try {
+      const url = `https://graph.facebook.com/${process.env.META_GRAPH_VERSION || 'v24.0'}/${phoneNumberId}/messages`;
+      const bodyPayload = {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: toWaId,
+        type: 'interactive',
+        interactive: {
+          type: 'button',
+          header: { type: 'text', text: headerText },
+          body: { text: bodyText },
+          footer: { text: footerText },
+          action: {
+            buttons: buttons.map((b) => ({
+              type: 'reply',
+              reply: {
+                id: b.id,
+                title: b.title,
+              },
+            })),
+          },
+        },
+      };
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(bodyPayload),
+      });
+
+      if (!res.ok) {
+        this.logger.error(`Failed to send WhatsApp button message: ${await res.text()}`);
+        return false;
+      }
+      return true;
+    } catch (err: any) {
+      this.logger.error(`Error in sendInteractiveButtonMessage: ${err.message}`);
+      return false;
+    }
+  }
+
+  async sendWhatsAppTemplate(
+    phoneNumberId: string,
+    toWaId: string,
+    templateName: string,
+    languageCode: string = 'en_US',
+    components: any[] = [],
+    accessToken: string,
+  ): Promise<boolean> {
+    if (!accessToken || accessToken === 'mock_token' || accessToken.startsWith('mock_')) {
+      this.logger.warn(`Refusing to send WhatsApp template without a real access token`);
+      return false;
+    }
+
+    try {
+      const url = `https://graph.facebook.com/${process.env.META_GRAPH_VERSION || 'v24.0'}/${phoneNumberId}/messages`;
+      const bodyPayload = {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: toWaId,
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: languageCode },
+          components,
+        },
+      };
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(bodyPayload),
+      });
+
+      if (!res.ok) {
+        this.logger.error(`Failed to send WhatsApp template: ${await res.text()}`);
+        return false;
+      }
+      return true;
+    } catch (err: any) {
+      this.logger.error(`Error in sendWhatsAppTemplate: ${err.message}`);
       return false;
     }
   }

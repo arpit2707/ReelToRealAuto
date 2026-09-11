@@ -14,16 +14,47 @@ datasource db {
 model User {
   id            String               @id @default(uuid())
   email         String               @unique
+  passwordHash  String?
   name          String?
+  metaUserId    String?              @unique
+  authProvider  String?
+  avatarUrl     String?
+  totpSecret    String?
   createdAt     DateTime             @default(now())
   updatedAt     DateTime             @updatedAt
   organizations OrganizationMember[]
+  refreshTokens RefreshToken[]
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+}
+
+model OauthState {
+  id        String   @id @default(uuid())
+  state     String   @unique
+  provider  String
+  intent    String
+  userId    String?
+  createdAt DateTime @default(now())
+  expiresAt DateTime
 }
 
 model Organization {
   id           String               @id @default(uuid())
   name         String
   slug         String               @unique
+  planId       String?
+  timezone     String               @default("Asia/Kolkata")
+  parentId     String?
+  parent       Organization?        @relation("OrgTree", fields: [parentId], references: [id])
+  children     Organization[]       @relation("OrgTree")
   brandPersona Json?
   createdAt    DateTime             @default(now())
   updatedAt    DateTime             @updatedAt
@@ -33,6 +64,16 @@ model Organization {
   postMappings PostMapping[]
   interactions InteractionLog[]
   rules        AutomationRule[]
+  contacts     Contact[]
+  templates    WhatsAppTemplate[]
+  campaigns    BroadcastCampaign[]
+  shopifyStores ShopifyStore[]
+  orders       EcommerceOrder[]
+  abandonedCarts AbandonedCart[]
+  wallet       Wallet?
+  connections  MetaConnection[]
+  conversations Conversation[]
+  webhookEvents WebhookEvent[]
 }
 
 model OrganizationMember {
@@ -48,21 +89,142 @@ model OrganizationMember {
 }
 
 model Channel {
-  id                   String       @id @default(uuid())
+  id                   String           @id @default(uuid())
   orgId                String
-  org                  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  org                  Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  connectionId         String?
+  connection           MetaConnection?  @relation(fields: [connectionId], references: [id], onDelete: SetNull)
   platform             String
   channelIdentifier    String
   name                 String
+  handle               String?
+  avatarUrl            String?
   accessTokenEncrypted String
-  permissions          String[]     @default([])
+  keyVersion           Int              @default(1)
+  permissions          String[]         @default([])
+  subscribedFields     String[]         @default([])
+  graphVersion         String           @default("v24.0")
   tokenExpiresAt       DateTime?
+  dataAccessExpiresAt  DateTime?
+  status               String           @default("ACTIVE")
+  lastError            Json?
+  lastHealthCheckAt    DateTime?
+  lastInboundAt        DateTime?
+  linkedChannelId      String?
   metadata             Json?
-  isActive             Boolean      @default(true)
-  createdAt            DateTime     @default(now())
-  updatedAt            DateTime     @updatedAt
+  isActive             Boolean          @default(true)
+  conversations        Conversation[]
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
 
-  @@unique([orgId, channelIdentifier])
+  @@unique([platform, channelIdentifier])
+  @@index([orgId, platform])
+  @@index([status])
+}
+
+model MetaConnection {
+  id                  String       @id @default(uuid())
+  orgId               String
+  org                 Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  provider            String
+  metaUserId          String?
+  businessId          String?
+  userTokenEncrypted  String
+  keyVersion          Int          @default(1)
+  grantedScopes       String[]     @default([])
+  tokenExpiresAt      DateTime?
+  dataAccessExpiresAt DateTime?
+  status              String       @default("ACTIVE")
+  lastCheckedAt       DateTime?
+  channels            Channel[]
+  createdAt           DateTime     @default(now())
+
+  @@unique([orgId, provider, metaUserId])
+}
+
+model InboxContact {
+  id             String         @id @default(uuid())
+  orgId          String
+  platform       String
+  platformUserId String
+  name           String?
+  username       String?
+  personId       String?
+  phone          String?
+  email          String?
+  locale         String?
+  tags           String[]       @default([])
+  attributes     Json?
+  conversations  Conversation[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@unique([orgId, platform, platformUserId])
+  @@index([orgId, phone])
+}
+
+model Conversation {
+  id              String        @id @default(uuid())
+  orgId           String
+  org             Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  channelId       String
+  channel         Channel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  contactId       String
+  contact         InboxContact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  lastInboundAt   DateTime?
+  lastOutboundAt  DateTime?
+  windowExpiresAt DateTime?
+  status          String        @default("OPEN")
+  assignedTo      String?
+  aiEnabled       Boolean       @default(true)
+  unreadCount     Int           @default(0)
+  messages        InboxMessage[]
+  updatedAt       DateTime      @updatedAt
+
+  @@unique([channelId, contactId])
+  @@index([orgId, status, lastInboundAt])
+}
+
+model InboxMessage {
+  id                String       @id @default(uuid())
+  orgId             String
+  conversationId    String
+  conversation      Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  platformMessageId String?
+  direction         String
+  type              String       @default("TEXT")
+  body              String?
+  payload           Json?
+  status            String       @default("SENT")
+  sentBy            String       @default("AUTOMATION")
+  createdAt         DateTime     @default(now())
+
+  @@unique([orgId, platformMessageId])
+  @@index([conversationId, createdAt])
+}
+
+model WebhookEvent {
+  id          String       @id @default(uuid())
+  orgId       String?
+  org         Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  object      String
+  channelId   String?
+  signatureOk Boolean
+  payload     Json
+  processedAt DateTime?
+  error       Json?
+  receivedAt  DateTime     @default(now())
+
+  @@index([object, receivedAt])
+}
+
+model DataDeletionRequest {
+  id                 String   @id @default(uuid())
+  confirmationCode   String   @unique
+  metaUserId         String?
+  status             String   @default("pending")
+  createdAt          DateTime @default(now())
+  completedAt        DateTime?
 }
 
 model AutomationRule {
@@ -114,19 +276,170 @@ model PostMapping {
 }
 
 model InteractionLog {
+  id              String       @id @default(uuid())
+  orgId           String
+  org             Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  channelType     String
+  eventType       String
+  inboundMessage  String
+  senderId        String
+  publicReply     String?
+  privateDm       String?
+  intent          String?
+  sentiment       String?
+  requiresHuman   Boolean      @default(false)
+  isResolved      Boolean      @default(false)
+  externalEventId String?      @unique
+  createdAt       DateTime     @default(now())
+}
+
+model ProcessedWebhookEvent {
+  id        String   @id @default(uuid())
+  eventId   String   @unique
+  source    String
+  createdAt DateTime @default(now())
+}
+
+model WhatsAppMessageStatus {
+  id            String    @id @default(uuid())
+  orgId         String?
+  phoneNumberId String
+  messageId     String
+  recipientWaId String?
+  status        String
+  timestamp     DateTime?
+  errorCode     String?
+  errorTitle    String?
+  rawPayload    Json?
+  createdAt     DateTime  @default(now())
+
+  @@index([messageId])
+  @@index([status, createdAt])
+}
+
+model Contact {
+  id               String       @id @default(uuid())
+  orgId            String
+  org              Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  phone            String
+  name             String?
+  email            String?
+  tags             String[]     @default([])
+  optInStatus      Boolean      @default(true)
+  customAttributes Json?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@unique([orgId, phone])
+}
+
+model WhatsAppTemplate {
   id             String       @id @default(uuid())
   orgId          String
   org            Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  channelType    String
-  eventType      String
-  inboundMessage String
-  senderId       String
-  publicReply    String?
-  privateDm      String?
-  intent         String?
-  sentiment      String?
-  requiresHuman  Boolean      @default(false)
-  isResolved     Boolean      @default(false)
+  name           String
+  category       String       @default("MARKETING")
+  language       String       @default("en_US")
+  status         String       @default("APPROVED")
+  components     Json
+  metaTemplateId String?
   createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([orgId, name, language])
+}
+
+model BroadcastCampaign {
+  id              String       @id @default(uuid())
+  orgId           String
+  org             Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  name            String
+  templateName    String
+  status          String       @default("DRAFT")
+  scheduledAt     DateTime?
+  totalRecipients Int          @default(0)
+  sentCount       Int          @default(0)
+  deliveredCount  Int          @default(0)
+  readCount       Int          @default(0)
+  failedCount     Int          @default(0)
+  retryEnabled    Boolean      @default(true)
+  retryCount      Int          @default(0)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+}
+
+model ShopifyStore {
+  id                     String       @id @default(uuid())
+  orgId                  String
+  org                    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  shopDomain             String
+  accessTokenEncrypted   String
+  webhookSecret          String?
+  codConfirmationEnabled Boolean      @default(true)
+  abandonedCartEnabled   Boolean      @default(true)
+  orderTrackingEnabled   Boolean      @default(true)
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  @@unique([orgId, shopDomain])
+}
+
+model EcommerceOrder {
+  id             String       @id @default(uuid())
+  orgId          String
+  org            Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  orderId        String
+  customerPhone  String
+  customerName   String?
+  totalAmount    Float
+  currency       String       @default("INR")
+  paymentMethod  String       @default("COD")
+  orderStatus    String       @default("OPEN")
+  codStatus      String       @default("PENDING")
+  confirmedAt    DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([orgId, orderId])
+}
+
+model AbandonedCart {
+  id                 String       @id @default(uuid())
+  orgId              String
+  org                Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  cartToken          String
+  customerPhone      String
+  customerName       String?
+  cartValue          Float
+  currency           String       @default("INR")
+  checkoutUrl        String
+  recoveryStatus     String       @default("PENDING")
+  reminderStage      Int          @default(0)
+  lastReminderSentAt DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@unique([orgId, cartToken])
+}
+
+model Wallet {
+  id           String              @id @default(uuid())
+  orgId        String              @unique
+  org          Organization        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  balance      Float               @default(0.0)
+  currency     String              @default("INR")
+  updatedAt    DateTime            @updatedAt
+  transactions WalletTransaction[]
+}
+
+model WalletTransaction {
+  id          String   @id @default(uuid())
+  walletId    String
+  wallet      Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  amount      Float
+  type        String   @default("DEBIT")
+  reason      String
+  referenceId String?
+  createdAt   DateTime @default(now())
 }
 

@@ -7,7 +7,10 @@ export class CryptoService {
   private readonly secretKey: Buffer;
 
   constructor() {
-    const rawKey = process.env.ENCRYPTION_SECRET || 'r2r_super_secret_32_bytes_vault_k';
+    const rawKey = process.env.ENCRYPTION_SECRET;
+    if (!rawKey) {
+      throw new Error('ENCRYPTION_SECRET is required');
+    }
     this.secretKey = crypto.createHash('sha256').update(rawKey).digest();
   }
 

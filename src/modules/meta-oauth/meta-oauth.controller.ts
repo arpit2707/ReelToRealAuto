@@ -1,7 +1,11 @@
-import { Controller, Post, Get, Body, Query, HttpStatus, HttpException } from '@nestjs/common';
+import { Controller, Post, Get, Body, Query, HttpStatus, HttpException, UseGuards } from '@nestjs/common';
 import { MetaOAuthService } from './meta-oauth.service';
+import { JwtAuthGuard, Roles, RolesGuard } from '../auth/auth.guard';
+import { CurrentUser } from '../../common/current-user.decorator';
+import type { JwtPayload } from '../auth/jwt';
 
 @Controller('api/meta')
+@UseGuards(JwtAuthGuard, RolesGuard)
 export class MetaOAuthController {
   constructor(private readonly metaOAuth: MetaOAuthService) {}
 
@@ -24,35 +28,33 @@ export class MetaOAuthController {
   }
 
   @Post('connect-channel')
+  @Roles('OWNER', 'ADMIN')
   async connectChannel(
-    @Body('org_id') orgId: string,
+    @CurrentUser() user: JwtPayload,
     @Body('channel')
     channel: {
       platform: 'INSTAGRAM' | 'FACEBOOK' | 'WHATSAPP';
       channelIdentifier: string;
       name: string;
       accessToken: string;
+      permissions?: string[];
     },
   ) {
-    if (!orgId || !channel) {
-      throw new HttpException('org_id and channel payload required', HttpStatus.BAD_REQUEST);
+    if (!channel) {
+      throw new HttpException('channel payload required', HttpStatus.BAD_REQUEST);
     }
-    const connected = await this.metaOAuth.connectChannel(orgId, channel);
+    const connected = await this.metaOAuth.connectChannel(user.orgId, channel);
     return { status: 'success', channel: connected };
   }
 
   @Get('channels')
-  async getChannels(@Query('org_id') orgId: string) {
-    if (!orgId) {
-      return { channels: [] };
-    }
-    const channels = await this.metaOAuth.listChannels(orgId);
+  async getChannels(@CurrentUser() user: JwtPayload) {
+    const channels = await this.metaOAuth.listChannels(user.orgId);
     return { channels };
   }
 
   @Get('health-audit')
-  async auditHealth(@Query('org_id') orgId?: string) {
-    const report = await this.metaOAuth.auditChannelsHealth(orgId);
-    return report;
+  async auditHealth(@CurrentUser() user: JwtPayload) {
+    return this.metaOAuth.auditChannelsHealth(user.orgId);
   }
 }
