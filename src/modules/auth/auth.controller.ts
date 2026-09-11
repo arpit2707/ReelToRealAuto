@@ -82,4 +82,9 @@ export class AuthController {
   async metaCallback(@Query('code') code: string, @Query('state') state: string, @Res() res: Response) {
     return res.redirect(await this.channels.handleCallback(code, state));
   }
+
+  @Get(':provider/callback')
+  async providerCallback(@Query('code') code: string, @Query('state') state: string, @Res() res: Response) {
+    return res.redirect(await this.channels.handleCallback(code, state));
+  }
 }

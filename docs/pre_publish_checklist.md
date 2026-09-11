@@ -45,27 +45,58 @@ Ye sabse zyada critical section hai. Ab webhooks live hain, to ye bugs theoretic
 
 ## Phase 2 — Legal Pages (App Review ka hard blocker)
 
-Meta reviewer in URLs ko **khud kholega**. Abhi `reel2realbooking.in` parked hai — koi A record nahi, HTTPS bhi nahi chalta. Ye teeno 404 denge aur review reject ho jaayega.
+> **Status 11 Sep 2026 — pages LIVE hain.** Webapp Vercel pe deploy ho chuka hai (project `reel2real`), custom domain `reel2realbooking.in` attach hai, TLS cert issue ho gaya. GoDaddy me A record `@ -> 76.76.21.21` (Vercel) set hai, TTL 1 hour.
+>
+> **Ek baaki problem:** purane A record ka TTL **1 week** tha, isliye kai resolvers ne `122.176.213.75` cache kar rakha hai. Google DNS flush kar diya (ab sahi), aur 1.1.1.1 / 9.9.9.9 / OpenDNS bhi sahi hain — par **Meta ka resolver abhi purani IP pe hai**, isliye Meta ke legal-URL fields abhi bhi save nahi ho rahe ("should represent a valid URL"). Ye apne aap theek hoga jab unka cache expire hoga. Tab tak bas retry karte raho.
 
-- [ ] `https://reel2realbooking.in/privacy-policy` live ho — WhatsApp/Instagram/Facebook data collection, retention aur deletion ka zikr hona chahiye
-- [ ] `https://reel2realbooking.in/terms-of-service` live ho
-- [ ] `https://reel2realbooking.in/data-deletion` live ho — user apna data delete kaise karwaye, step-by-step
-- [ ] `https://reel2realbooking.in/` pe asli landing page ho jo product explain kare (reviewer isko bhi dekhta hai)
-- [ ] Teeno URLs HTTPS pe valid certificate ke saath khulein
-
----
+- [x] Webapp Vercel pe deploy — `reel2realbooking.in` live, HTTPS valid
+- [x] `/privacy`, `/terms`, `/data-deletion` — teeno 200 dete hain
+- [x] `next.config.ts` redirects: `/privacy-policy` -> `/privacy`, `/terms-of-service` -> `/terms`
+- [x] Privacy policy me AI/sub-processor disclosure, user rights (DPDP + GDPR), children, cookies, grievance officer sections add
+- [x] Data deletion page pe confirmation-code se status check karne ka section
+- [ ] Landing page `/` abhi AuthGate hai — logged-out user `/login` pe redirect hota hai (policy links wahan footer me hain). Reviewer ke liye ek proper public product page behtar rahega.
 
 ## Phase 3 — App Settings → Basic
 
 - [x] App domains → `reel2realbooking.in` — **done**
-- [x] Privacy policy URL — **done**
-- [x] Terms of Service URL — **done**
-- [x] User data deletion URL — **done** *(note: ye tab tak reject hota rahega jab tak App domains khaali ho — pehle domain add karo, phir ye field accept hoti hai)*
-- [x] Category → "Business and pages" — **done**
-- [ ] **App icon 1024×1024 upload karo** — file bana kar bhej di gayi hai (`r2r-app-icon-1024-transparent.png`). Meta transparent background maangta hai. Browser automation file-picker nahi chala sakta, ye manually karna hoga.
-- [ ] Site URL set karo (Website platform ke andar)
-- [ ] Contact email review karo — abhi `arpitgaurav.goldi723@gmail.com` hai. Business domain ka email (`support@reel2realbooking.in`) review me zyada professional lagega.
-- [ ] Faltu platforms hata do agar hain (Page Tab / Instant Game) — reviewer ko confuse karte hain
+- [ ] Privacy policy URL -> `https://reel2realbooking.in/privacy` — **Meta abhi reject kar raha (DNS cache), retry karte raho**
+- [ ] Terms of Service URL -> `https://reel2realbooking.in/terms` — same
+- [ ] User data deletion URL -> `https://reel2realbooking.in/data-deletion` — same (abhi bhi `https://www.facebook.com/` padi hai)
+- [x] Category -> "Business and pages" — verified
+- [x] App domains -> `reel2realbooking.in` — verified
+- [x] App icon uploaded — verified
+- [x] **Page Tab aur Instant Game platforms remove kar diye** — verified
+- [ ] Site URL set karo (Website platform) — abhi khaali
+- [ ] Contact email abhi `arpitgaurav.goldi723@gmail.com` — `support@reel2realbooking.in` pe badlo **jab wo mailbox bana lo** (pehle badla to Meta ke notices miss ho jaayenge)
+- [ ] Business address / DPO contact fields khaali hain
+
+### Facebook Login for Business -> Settings
+
+- [x] **Valid OAuth Redirect URIs** = `https://reel2realbooking.in/auth/meta/callback` — **set + verified**
+- [x] **Deauthorize callback URL** = `https://reel2realbooking.in/auth/facebook/deauthorize` — **set + verified**
+- [ ] Data deletion **callback** URL bhi set kar sakte ho (`POST auth/facebook/data-deletion`) — instructions URL ki jagah ya uske saath.
+
+---
+
+## Architecture note (11 Sep 2026) — apex ab Vercel pe hai
+
+`reel2realbooking.in` ab **frontend (Vercel)** serve karta hai. Backend (NestJS, port 5002) alag hai. Dono ko ek hi domain pe rakhne ke liye webapp ke `next.config.ts` me rewrites add kiye gaye hain:
+
+| Path | Proxy destination |
+|---|---|
+| `/auth/meta/*` | `${BACKEND_ORIGIN}/auth/meta/*` |
+| `/auth/facebook/*` | `${BACKEND_ORIGIN}/auth/facebook/*` |
+| `/webhook/*` | `${BACKEND_ORIGIN}/webhook/*` |
+| `/api/*` | `${BACKEND_ORIGIN}/api/*` |
+
+**Ab ye karna baaki hai:**
+
+- [ ] Backend ko ek stable public HTTPS URL pe le jao (ngrok static domain, ya Railway/Render/Fly, ya `api.reel2realbooking.in`)
+- [ ] Vercel project `reel2real` me env var **`BACKEND_ORIGIN`** = wahi URL set karo, phir redeploy
+- [ ] Backend `.env` me `PUBLIC_BASE_URL="https://reel2realbooking.in"` already sahi hai — rewrites ke saath ye Meta ke callbacks ke liye match karta hai
+- [ ] `NEXT_PUBLIC_API_URL` bhi `https://reel2realbooking.in` hi rahega (rewrites `/api/*` handle kar lenge)
+- [ ] Meta webhook callback URL ngrok se `https://reel2realbooking.in/webhook` pe shift karo (Phase 4 ka pending item isse solve ho jaata hai)
+
 
 ---
 
