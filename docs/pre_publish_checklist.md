@@ -33,11 +33,11 @@ Ye sabse zyada critical section hai. Ab webhooks live hain, to ye bugs theoretic
 
 - [x] `META_APP_SECRET` — missing ho to webhook HMAC reject (fail-closed)
 - [x] `META_VERIFY_TOKEN` — env se; hardcoded default hata diya. Meta dashboard token match karna zaroori hai.
-- [ ] `META_APP_ID` = `1390089122590430` (env me set karo)
+- [x] `META_APP_ID` = `1390089122590430` — Render me set (render.yaml)
 - [x] `ENCRYPTION_SECRET` — required; hardcoded fallback hata diya
-- [ ] `AI_SERVICE_URL`
-- [ ] `PUBLIC_BASE_URL`
-- [ ] `SHOPIFY_API_SECRET` (webhook HMAC ke liye) + `SHOPIFY_ACCESS_TOKEN` live values
+- [ ] `AI_SERVICE_URL` — ⚠️ **abhi local `127.0.0.1:8000` hai, Render se reach nahi hoga.** AI service deploy karna baaki hai.
+- [x] `PUBLIC_BASE_URL` = `https://reel2realbooking.in` — Render me set
+- [x] `SHOPIFY_API_SECRET` + `SHOPIFY_ACCESS_TOKEN` — Render dashboard me set
 - [x] `.env.example` file banao (gitignore me `!.env.example` already allow hai)
 - [ ] Confirm karo ki koi bhi real token git me commit nahi hua
 
@@ -78,27 +78,41 @@ Ye sabse zyada critical section hai. Ab webhooks live hain, to ye bugs theoretic
 
 ---
 
-## Architecture note (11 Sep 2026) — apex ab Vercel pe hai
+## Live Architecture (verified 11 Sep 2026)
 
-`reel2realbooking.in` ab **frontend (Vercel)** serve karta hai. Backend (NestJS, port 5002) alag hai. Dono ko ek hi domain pe rakhne ke liye webapp ke `next.config.ts` me rewrites add kiye gaye hain:
+| Layer | Kahan | Status |
+|---|---|---|
+| Frontend (Next.js) | Vercel, project `reel2real` | live on `https://reel2realbooking.in` |
+| Backend (NestJS) | Render, service `reel2real-api`, Singapore, **free plan** | `https://reel2real-api.onrender.com` — `/health` 200, DB up |
+| Database | Supabase Postgres (pooler, ap-southeast-2) | migrations applied via `prisma migrate deploy` on boot |
+| AI service | **abhi bhi local** (`127.0.0.1:8000`) | Render se reachable nahi — AI replies kaam nahi karenge |
 
-| Path | Proxy destination |
+Apex domain frontend serve karta hai; backend paths Vercel rewrites se proxy hote hain (`next.config.ts`):
+
+| Path | Jaata hai |
 |---|---|
-| `/auth/meta/*` | `${BACKEND_ORIGIN}/auth/meta/*` |
-| `/auth/facebook/*` | `${BACKEND_ORIGIN}/auth/facebook/*` |
-| `/webhook/*` | `${BACKEND_ORIGIN}/webhook/*` |
-| `/api/*` | `${BACKEND_ORIGIN}/api/*` |
+| `/auth/:path*` | Render backend *(except `/auth/callback`, jo frontend ka apna page hai — filesystem route jeetta hai)* |
+| `/api/:path*` | Render backend |
+| `/webhook`, `/webhook/:path*` | Render backend |
+| `/shopify/:path*` | Render backend |
+| `/health` | Render backend |
 
-**Ab ye karna baaki hai:**
+Vercel env var **`BACKEND_ORIGIN`** = `https://reel2real-api.onrender.com`.
+Frontend ka `API_BASE` bundle me `https://reel2realbooking.in` bake hai — same-origin, to CORS ka koi issue nahi.
 
-- [ ] Backend ko ek stable public HTTPS URL pe le jao (ngrok static domain, ya Railway/Render/Fly, ya `api.reel2realbooking.in`)
-- [ ] Vercel project `reel2real` me env var **`BACKEND_ORIGIN`** = wahi URL set karo, phir redeploy
-- [ ] Backend `.env` me `PUBLIC_BASE_URL="https://reel2realbooking.in"` already sahi hai — rewrites ke saath ye Meta ke callbacks ke liye match karta hai
-- [ ] `NEXT_PUBLIC_API_URL` bhi `https://reel2realbooking.in` hi rahega (rewrites `/api/*` handle kar lenge)
-- [ ] Meta webhook callback URL ngrok se `https://reel2realbooking.in/webhook` pe shift karo (Phase 4 ka pending item isse solve ho jaata hai)
+**Verified end-to-end (apex ke through):**
 
-
----
+```
+/privacy /terms /data-deletion      200   (frontend)
+/privacy-policy /terms-of-service   308 -> redirect  (frontend)
+/auth/callback                      200 html  (frontend page, shadow nahi hua)
+/health                             200 {"status":"ok","database":"up"}
+/auth/me                            401 json  (backend)
+/api/inbox/channels                 401 json  (backend)
+/auth/meta/callback                 302       (backend)
+/auth/facebook/data-deletion/<code> 200 {"status":"unknown"}  (backend)
+/webhook                            403       (backend, signature reject — sahi)
+```
 
 ## Phase 4 — Webhooks
 
@@ -115,9 +129,9 @@ Ye sabse zyada critical section hai. Ab webhooks live hain, to ye bugs theoretic
 | Instagram | `comments`, `messages`, `messaging_postbacks`, `messaging_referral` |
 | WhatsApp | `messages`, `account_update`, `account_alerts`, `business_capability_update`, `message_template_status_update`, `message_template_quality_update`, `phone_number_quality_update` |
 
-- [ ] **Stable callback URL pe shift karo.** Abhi `https://1740-122-176-213-75.ngrok-free.app/webhook` hai — ngrok restart hote hi ye mar jaayega aur teeno objects me dobara daalna padega. Do options:
-  - ngrok free account ka **1 free static domain** claim karo, ya
-  - `api.reel2realbooking.in` → aapka static IP (GoDaddy me A record), port 443 forward, valid TLS cert
+- [ ] **Callback URL `https://reel2realbooking.in/webhook` pe shift karo** — backend ab Render pe hai aur ye path already proxy ho raha hai (403 signature-reject deta hai, matlab pahunch raha hai). ngrok ki ab zaroorat nahi.
+  - ⚠️ Ye tab tak nahi ho payega jab tak Meta ka DNS resolver purani IP cache kiye baitha hai — legal URLs wali hi problem.
+  - ⚠️ Render **free plan 15 min inactivity pe sleep** karta hai (pehla request 50s+). Meta lagataar fail hone par webhook subscription **apne aap disable** kar deta hai. Real traffic se pehle Starter ($7/mo) pe shift karo.
 - [ ] Publish ke baad ye blocked fields dobara try karo — Advanced Access milte hi khul jaayenge:
   - `template_category_update` (WhatsApp) — template category badalne pe pricing badalti hai, wallet billing ke liye zaroori
   - `messaging_optins` (Page)
@@ -180,10 +194,10 @@ Abhi **sab kuch "Ready for testing" (Standard Access)** pe hai. Ye sirf aapke ap
 
 ## Phase 7 — Database & Multi-Tenant Wiring
 
-- [ ] Prisma migration **apply** karo (`npx prisma migrate deploy`) — SQL `prisma/migrations/` me hai; live DB pe chalana baaki hai
+- [x] Prisma migrations **apply ho gayi** — Render ka start command `prisma migrate deploy && node dist/main` chalata hai; app successfully boot hua aur `/health` `database: up` deta hai
 - [x] WhatsApp / Shopify seed path: `prisma/seed.ts` + boot-time env sync. Default phone number id `1259818730556396`; tokens env se.
 - [x] `default_org` / `default_brand` / `mock_token` send paths hata diye — bina mapped store/channel ke WhatsApp nahi jaata
-- [ ] `/api/meta/health-audit` chala kar confirm karo ki sab channels healthy hain aur koi identifier collision nahi hai
+- [ ] `/api/meta/health-audit` chala kar confirm karo ki sab channels healthy hain (endpoint live hai, auth chahiye — 401 deta hai)
 
 ---
 
