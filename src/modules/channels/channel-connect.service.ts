@@ -70,12 +70,12 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
 
 
   // Meta rejects the whole dialog with "Invalid Scopes" if the app asks for a
-  // permission no enabled use case grants. instagram_manage_comments,
-  // instagram_manage_messages and instagram_content_publish need the
-  // "Manage messaging & content on Instagram" use case added to the app —
-  // until then they are left out so the rest of the connect flow still works.
-  // Once that use case is enabled, add them back through the env override
-  // below rather than editing this list.
+  // permission no enabled use case grants, so every name here is verified
+  // against the OAuth dialog. The Instagram permissions come from the
+  // "Manage messaging & content on Instagram" use case (API setup with
+  // Facebook login), and business_management is required alongside them.
+  // Note the permission is instagram_content_publishing, not ..._publish.
+  // META_SCOPES_* allow tuning without a redeploy.
   private scopesFor(provider: ConnectProvider) {
     const override =
       provider === 'whatsapp'
@@ -89,7 +89,16 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
       return 'business_management,whatsapp_business_management,whatsapp_business_messaging';
     }
     if (provider === 'instagram') {
-      return 'pages_show_list,pages_manage_metadata,instagram_basic';
+      return [
+        'pages_show_list',
+        'pages_manage_metadata',
+        'pages_read_engagement',
+        'business_management',
+        'instagram_basic',
+        'instagram_manage_comments',
+        'instagram_manage_messages',
+        'instagram_content_publishing',
+      ].join(',');
     }
     return [
       'pages_show_list',
@@ -98,7 +107,10 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
       'pages_read_engagement',
       'pages_manage_engagement',
       'pages_manage_posts',
+      'business_management',
       'instagram_basic',
+      'instagram_manage_comments',
+      'instagram_manage_messages',
     ].join(',');
   }
 
