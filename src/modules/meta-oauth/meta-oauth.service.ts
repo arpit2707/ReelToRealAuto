@@ -163,16 +163,18 @@ export class MetaOAuthService implements OnModuleInit {
       metadata?: any;
     },
   ) {
-    // Ensure organization exists
+    // Ensure organization exists. Match on the primary key, not on a slug
+    // derived from the id: a real org created at registration has its own slug
+    // (from the workspace name), so a slug lookup misses it and the upsert then
+    // tries to create a row whose id is already taken.
     const cleanOrgId = orgId || 'org_default';
-    const slug = cleanOrgId.toLowerCase().replace(/[^a-z0-9]/g, '-');
     await this.prisma.organization.upsert({
-      where: { slug },
+      where: { id: cleanOrgId },
       update: {},
       create: {
         id: cleanOrgId,
         name: cleanOrgId === 'org_default' ? 'Primary Merchant Org' : cleanOrgId,
-        slug,
+        slug: cleanOrgId.toLowerCase().replace(/[^a-z0-9]/g, '-'),
       },
     });
 
