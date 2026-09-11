@@ -241,6 +241,9 @@ export class MetaOAuthService implements OnModuleInit {
       tokenExpiresAt: c.tokenExpiresAt,
       metadata: c.metadata,
       isActive: c.isActive,
+      status: c.status,
+      handle: c.handle,
+      subscribedFields: c.subscribedFields,
       createdAt: c.createdAt,
     }));
   }
