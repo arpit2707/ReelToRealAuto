@@ -15,6 +15,12 @@ services:
         value: https://reel2realbooking.in
       - key: FRONTEND_URL
         value: https://reel2realbooking.in
+      - key: META_GRAPH_VERSION
+        value: v24.0
+      # Signs the app's own session tokens. No existing sessions to preserve,
+      # so let Render generate it rather than copying a secret around.
+      - key: JWT_SECRET
+        generateValue: true
       - key: META_APP_ID
         value: "1390089122590430"
       # Set these in the Render dashboard — never commit them.
@@ -31,4 +37,20 @@ services:
       - key: SHOPIFY_ACCESS_TOKEN
         sync: false
       - key: AI_SERVICE_URL
+        sync: false
+      # Optional: boot-time sync of the existing test channels. The code skips
+      # each block unless both of its vars are present.
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_WABA_ID
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: PAGE_ID_MEME_WORLD
+        sync: false
+      - key: PAGE_TOKEN_MEME_WORLD
+        sync: false
+      - key: PAGE_ID_DESI_MEME_FACTORY
+        sync: false
+      - key: PAGE_TOKEN_DESI_MEME_FACTORY
         sync: false
