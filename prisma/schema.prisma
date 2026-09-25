@@ -378,6 +378,11 @@ model ShopifyStore {
   codConfirmationEnabled Boolean      @default(true)
   abandonedCartEnabled   Boolean      @default(true)
   orderTrackingEnabled   Boolean      @default(true)
+  // Approved WhatsApp template names. COD and cart messages usually go to people
+  // outside the 24h service window, where Meta only accepts templates.
+  codTemplateName        String?
+  cartTemplateNames      String[]     @default([])
+  templateLanguage       String       @default("en")
   createdAt              DateTime     @default(now())
   updatedAt              DateTime     @updatedAt
 
@@ -397,10 +402,16 @@ model EcommerceOrder {
   orderStatus    String       @default("OPEN")
   codStatus      String       @default("PENDING")
   confirmedAt    DateTime?
+  cancelledAt    DateTime?
+  checkoutToken  String?
+  itemsSummary   String?
+  confirmationSentAt DateTime?
+  confirmationError  String?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
   @@unique([orgId, orderId])
+  @@index([orgId, createdAt])
 }
 
 model AbandonedCart {
@@ -416,10 +427,15 @@ model AbandonedCart {
   recoveryStatus     String       @default("PENDING")
   reminderStage      Int          @default(0)
   lastReminderSentAt DateTime?
+  lastReminderError  String?
+  itemsSummary       String?
+  recoveredOrderId   String?
+  recoveredAt        DateTime?
   createdAt          DateTime     @default(now())
   updatedAt          DateTime     @updatedAt
 
   @@unique([orgId, cartToken])
+  @@index([orgId, createdAt])
 }
 
 model Wallet {
