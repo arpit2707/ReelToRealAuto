@@ -1,19 +1,74 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { graphUrl } from '../../common/graph';
 
+function metaErrorMessage(body: string): string {
+  try {
+    const parsed = JSON.parse(body);
+    return parsed?.error?.error_user_msg || parsed?.error?.message || body;
+  } catch {
+    return body;
+  }
+}
+
 @Injectable()
 export class MetaPublisherService {
   private readonly logger = new Logger(MetaPublisherService.name);
 
-  async replyToComment(commentId: string, message: string, accessToken: string): Promise<boolean> {
-    if (!accessToken || accessToken === 'mock_token' || accessToken.startsWith('mock_')) {
-      this.logger.warn(`Refusing to post comment reply without a real access token`);
+  // Instagram comment replies go to /{comment-id}/replies.
+  async replyToComment(
+    commentId: string,
+    message: string,
+    accessToken: string,
+    failure?: { message?: string },
+  ): Promise<boolean> {
+    return this.postCommentReply(
+      commentId,
+      'replies',
+      message,
+      accessToken,
+      failure,
+    );
+  }
+
+  // Facebook has no /replies edge: a reply is a comment on the comment.
+  async replyToFacebookComment(
+    commentId: string,
+    message: string,
+    accessToken: string,
+    failure?: { message?: string },
+  ): Promise<boolean> {
+    return this.postCommentReply(
+      commentId,
+      'comments',
+      message,
+      accessToken,
+      failure,
+    );
+  }
+
+  private async postCommentReply(
+    commentId: string,
+    edge: 'replies' | 'comments',
+    message: string,
+    accessToken: string,
+    failure?: { message?: string },
+  ): Promise<boolean> {
+    if (
+      !accessToken ||
+      accessToken === 'mock_token' ||
+      accessToken.startsWith('mock_')
+    ) {
+      this.logger.warn(
+        `Refusing to post comment reply without a real access token`,
+      );
+      if (failure)
+        failure.message =
+          'This channel has no valid access token. Reconnect it.';
       return false;
     }
 
     try {
-      const url = `https://graph.facebook.com/${process.env.META_GRAPH_VERSION || 'v24.0'}/${commentId}/replies`;
-      const res = await fetch(url, {
+      const res = await fetch(graphUrl(`/${commentId}/${edge}`), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -23,19 +78,37 @@ export class MetaPublisherService {
       });
 
       if (!res.ok) {
-        this.logger.error(`Failed to post comment reply: ${await res.text()}`);
+        const body = await res.text();
+        this.logger.error(`Failed to post comment reply: ${body}`);
+        if (failure) failure.message = metaErrorMessage(body);
         return false;
       }
       return true;
     } catch (err: any) {
-      this.logger.error(`Error in replyToComment: ${err.message}`);
+      this.logger.error(`Error in postCommentReply: ${err.message}`);
+      if (failure) failure.message = err.message;
       return false;
     }
   }
 
-  async sendPrivateDm(recipientId: string, message: string, accessToken: string): Promise<boolean> {
-    if (!accessToken || accessToken === 'mock_token' || accessToken.startsWith('mock_')) {
-      this.logger.warn(`Refusing to send private DM without a real access token`);
+  // `failure`, when passed, receives Meta's reason so a caller can show it to the user.
+  async sendPrivateDm(
+    recipientId: string,
+    message: string,
+    accessToken: string,
+    failure?: { message?: string },
+  ): Promise<boolean> {
+    if (
+      !accessToken ||
+      accessToken === 'mock_token' ||
+      accessToken.startsWith('mock_')
+    ) {
+      this.logger.warn(
+        `Refusing to send private DM without a real access token`,
+      );
+      if (failure)
+        failure.message =
+          'This channel has no valid access token. Reconnect it.';
       return false;
     }
 
@@ -54,23 +127,37 @@ export class MetaPublisherService {
       });
 
       if (!res.ok) {
-        this.logger.error(`Failed to send private DM: ${await res.text()}`);
+        const body = await res.text();
+        this.logger.error(`Failed to send private DM: ${body}`);
+        if (failure) failure.message = metaErrorMessage(body);
         return false;
       }
       return true;
     } catch (err: any) {
       this.logger.error(`Error in sendPrivateDm: ${err.message}`);
+      if (failure) failure.message = err.message;
       return false;
     }
   }
 
-  async replyToFacebookComment(commentId: string, message: string, accessToken: string): Promise<boolean> {
-    return this.replyToComment(commentId, message, accessToken);
-  }
-
-  async sendFacebookMessengerDm(pageId: string, recipientId: string, message: string, accessToken: string): Promise<boolean> {
-    if (!accessToken || accessToken === 'mock_token' || accessToken.startsWith('mock_')) {
-      this.logger.warn(`Refusing to send Messenger DM without a real access token`);
+  async sendFacebookMessengerDm(
+    pageId: string,
+    recipientId: string,
+    message: string,
+    accessToken: string,
+    failure?: { message?: string },
+  ): Promise<boolean> {
+    if (
+      !accessToken ||
+      accessToken === 'mock_token' ||
+      accessToken.startsWith('mock_')
+    ) {
+      this.logger.warn(
+        `Refusing to send Messenger DM without a real access token`,
+      );
+      if (failure)
+        failure.message =
+          'This channel has no valid access token. Reconnect it.';
       return false;
     }
 
@@ -89,12 +176,15 @@ export class MetaPublisherService {
       });
 
       if (!res.ok) {
-        this.logger.error(`Failed to send Messenger DM: ${await res.text()}`);
+        const body = await res.text();
+        this.logger.error(`Failed to send Messenger DM: ${body}`);
+        if (failure) failure.message = metaErrorMessage(body);
         return false;
       }
       return true;
     } catch (err: any) {
       this.logger.error(`Error in sendFacebookMessengerDm: ${err.message}`);
+      if (failure) failure.message = err.message;
       return false;
     }
   }
@@ -105,9 +195,19 @@ export class MetaPublisherService {
     message: string,
     accessToken: string,
     checkoutUrl?: string,
+    failure?: { message?: string },
   ): Promise<boolean> {
-    if (!accessToken || accessToken === 'mock_token' || accessToken.startsWith('mock_')) {
-      this.logger.warn(`Refusing to send WhatsApp message without a real access token`);
+    if (
+      !accessToken ||
+      accessToken === 'mock_token' ||
+      accessToken.startsWith('mock_')
+    ) {
+      this.logger.warn(
+        `Refusing to send WhatsApp message without a real access token`,
+      );
+      if (failure)
+        failure.message =
+          'This channel has no valid access token. Reconnect it.';
       return false;
     }
 
@@ -155,12 +255,15 @@ export class MetaPublisherService {
       });
 
       if (!res.ok) {
-        this.logger.error(`Failed to send WhatsApp message: ${await res.text()}`);
+        const body = await res.text();
+        this.logger.error(`Failed to send WhatsApp message: ${body}`);
+        if (failure) failure.message = metaErrorMessage(body);
         return false;
       }
       return true;
     } catch (err: any) {
       this.logger.error(`Error in sendWhatsAppMessage: ${err.message}`);
+      if (failure) failure.message = err.message;
       return false;
     }
   }

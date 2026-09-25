@@ -14,6 +14,11 @@ export class InboxController {
     return this.inbox.listChannels(user.orgId);
   }
 
+  @Get('activity')
+  activity(@CurrentUser() user: JwtPayload) {
+    return this.inbox.listActivity(user.orgId);
+  }
+
   @Get('threads')
   listThreads(@CurrentUser() user: JwtPayload, @Query('platform') platform = 'WHATSAPP') {
     return this.inbox.listThreads(user.orgId, platform);
