@@ -179,9 +179,14 @@ export class WebhookService {
           if (!(await this.claimEvent(msg.id, 'whatsapp_message'))) continue;
 
           const fromWaId = msg.from;
-          const buttonId = msg.interactive?.button_reply?.id;
+          // Session messages report taps as interactive.button_reply; template quick
+          // replies arrive as type "button" with the payload we set at send time.
+          const buttonId = msg.interactive?.button_reply?.id || msg.button?.payload;
           const text =
-            msg.text?.body || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title;
+            msg.text?.body ||
+            msg.interactive?.button_reply?.title ||
+            msg.interactive?.list_reply?.title ||
+            msg.button?.text;
           if (!text || !fromWaId) continue;
 
           await this.conversations.ingestInbound({
@@ -194,7 +199,13 @@ export class WebhookService {
           });
 
           if (buttonId && (buttonId.startsWith('COD_CONFIRM_') || buttonId.startsWith('COD_CANCEL_'))) {
-            await this.shopifyService.handleCodButtonCallback(buttonId, fromWaId, phoneNumberId, decryptedToken);
+            await this.shopifyService.handleCodButtonCallback(
+              buttonId,
+              fromWaId,
+              phoneNumberId,
+              decryptedToken,
+              channel.orgId,
+            );
             continue;
           }
 
