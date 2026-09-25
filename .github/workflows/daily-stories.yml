@@ -1,0 +1,25 @@
+name: Daily story ideas
+
+# Render's free plan sleeps, so an in-process timer cannot be trusted. This
+# wakes the API once a day and starts the run; retries cover the cold start.
+on:
+  schedule:
+    - cron: '30 3 * * *' # 09:00 IST
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Start the daily run
+        env:
+          API_URL: ${{ secrets.STORY_API_URL || 'https://reel2real-api.onrender.com' }}
+          CRON_SECRET: ${{ secrets.STORY_CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "STORY_CRON_SECRET is not set in the repository secrets; skipping."
+            exit 0
+          fi
+          curl --fail-with-body -sS --retry 6 --retry-delay 20 --retry-all-errors --max-time 90 \
+            -X POST -H "Authorization: Bearer $CRON_SECRET" "$API_URL/api/stories/cron/daily"
