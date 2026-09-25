@@ -40,7 +40,11 @@ export class AiClientService {
       this.logger.log(`Invoking Personalised-AI for sender ${payload.sender_id} on ${payload.channel_type}`);
       const response = await fetch(this.aiServiceUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // Must match AI_SERVICE_TOKEN on the AI service, which rejects calls without it.
+          ...(process.env.AI_SERVICE_TOKEN ? { 'X-AI-Service-Token': process.env.AI_SERVICE_TOKEN } : {}),
+        },
         body: JSON.stringify(payload),
       });
 
