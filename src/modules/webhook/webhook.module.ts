@@ -7,9 +7,10 @@ import { CryptoModule } from '../crypto/crypto.module';
 import { ShopifyModule } from '../shopify/shopify.module';
 
 import { ConversationModule } from '../conversations/conversation.module';
+import { StoriesModule } from '../stories/stories.module';
 
 @Module({
-  imports: [AiClientModule, MetaPublisherModule, CryptoModule, ShopifyModule, ConversationModule],
+  imports: [AiClientModule, MetaPublisherModule, CryptoModule, ShopifyModule, ConversationModule, StoriesModule],
   controllers: [WebhookController],
   providers: [WebhookService],
   exports: [WebhookService],

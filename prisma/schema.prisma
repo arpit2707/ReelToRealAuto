@@ -74,6 +74,8 @@ model Organization {
   connections  MetaConnection[]
   conversations Conversation[]
   webhookEvents WebhookEvent[]
+  storySettings StorySettings?
+  storyBatches  StoryBatch[]
 }
 
 model OrganizationMember {
@@ -443,3 +445,58 @@ model WalletTransaction {
   createdAt   DateTime @default(now())
 }
 
+
+// Daily Instagram story ideas: Gemini drafts four options each morning, the
+// merchant picks one on WhatsApp, and the pick is published as an IG story.
+model StorySettings {
+  id                  String       @id @default(uuid())
+  orgId               String       @unique
+  org                 Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  enabled             Boolean      @default(false)
+  // Merchant's own WhatsApp number (digits with country code) that receives the ideas.
+  whatsappNumber      String?
+  // Channel.id of the Instagram account to publish to; the org's first active one when null.
+  instagramChannelId  String?
+  businessDescription String?
+  // Semrush regional database, e.g. "in" or "us".
+  keywordDatabase     String       @default("in")
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+}
+
+model StoryBatch {
+  id               String        @id @default(uuid())
+  orgId            String
+  org              Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  // Calendar day in the org's timezone (YYYY-MM-DD); one batch per org per day.
+  forDate          String
+  status           String        @default("GENERATING")
+  waRecipient      String?
+  selectedOptionId String?
+  publishedMediaId String?
+  error            Json?
+  options          StoryOption[]
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@unique([orgId, forDate])
+  @@index([status, createdAt])
+}
+
+model StoryOption {
+  id             String     @id @default(uuid())
+  batchId        String
+  batch          StoryBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  position       Int
+  title          String
+  idea           String
+  imagePrompt    String
+  seedKeyword    String
+  imageData      Bytes?
+  keywords       String[]   @default([])
+  hashtags       String[]   @default([])
+  finalImageData Bytes?
+  createdAt      DateTime   @default(now())
+
+  @@unique([batchId, position])
+}

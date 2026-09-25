@@ -38,6 +38,16 @@ services:
         sync: false
       - key: AI_SERVICE_URL
         sync: false
+      # Daily Instagram story ideas (docs/daily_story_ideas.md). The feature
+      # stays idle until these are set.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SEMRUSH_API_KEY
+        sync: false
+      - key: APIFY_TOKEN
+        sync: false
+      - key: STORY_CRON_SECRET
+        sync: false
       # Optional: boot-time sync of the existing test channels. The code skips
       # each block unless both of its vars are present.
       - key: WHATSAPP_PHONE_NUMBER_ID

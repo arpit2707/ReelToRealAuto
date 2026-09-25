@@ -5,6 +5,7 @@ import { AiClientService } from '../ai-client/ai-client.service';
 import { MetaPublisherService } from '../meta-publisher/meta-publisher.service';
 import { ShopifyService } from '../shopify/shopify.service';
 import { ConversationService } from '../conversations/conversation.service';
+import { StoriesService } from '../stories/stories.service';
 import { hmacSha256Hex, timingSafeEqualString } from '../../common/hmac';
 
 @Injectable()
@@ -18,6 +19,7 @@ export class WebhookService {
     private readonly metaPublisher: MetaPublisherService,
     private readonly shopifyService: ShopifyService,
     private readonly conversations: ConversationService,
+    private readonly stories: StoriesService,
   ) {}
 
   verifyWebhook(mode: string, token: string, challenge: string): string | null {
@@ -133,7 +135,19 @@ export class WebhookService {
           await this.persistWhatsAppStatuses(phoneNumberId, statuses);
         }
 
-        const messages = change.value.messages || [];
+        // Daily story picks arrive on the Reel2Real number, which need not be a
+        // merchant channel, so route them before the channel lookup below.
+        const messages: any[] = [];
+        for (const msg of change.value.messages || []) {
+          if (!this.stories.isStoryReply(msg, phoneNumberId)) {
+            messages.push(msg);
+            continue;
+          }
+          if (!(await this.claimEvent(msg.id, 'whatsapp_message'))) continue;
+          await this.stories
+            .handleWhatsAppReply(msg)
+            .catch((e) => this.logger.error(`Story reply handling failed: ${e.message}`));
+        }
         if (messages.length === 0) continue;
 
         this.logger.log(`Processing WhatsApp event for Phone ID: ${phoneNumberId} (${displayPhone})`);
