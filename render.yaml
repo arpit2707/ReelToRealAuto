@@ -38,6 +38,9 @@ services:
         sync: false
       - key: AI_SERVICE_URL
         sync: false
+      # Same value as AI_SERVICE_TOKEN on the reel2real-ai service.
+      - key: AI_SERVICE_TOKEN
+        sync: false
       # Daily Instagram story ideas (docs/daily_story_ideas.md). The feature
       # stays idle until these are set.
       - key: GEMINI_API_KEY
