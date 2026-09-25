@@ -52,7 +52,7 @@ export class InboxService {
     const rows = await this.prisma.conversation.findMany({
       where: { orgId, channel: { platform: platform.toUpperCase() } },
       include: { contact: true, channel: true, messages: { orderBy: { createdAt: 'desc' }, take: 1 } },
-      orderBy: { lastInboundAt: 'desc' },
+      orderBy: { lastInboundAt: { sort: 'desc', nulls: 'last' } },
       take: 100,
     });
     return rows.map((c) => ({
