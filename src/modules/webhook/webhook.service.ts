@@ -189,7 +189,7 @@ export class WebhookService {
             msg.button?.text;
           if (!text || !fromWaId) continue;
 
-          await this.conversations.ingestInbound({
+          const conversation = await this.conversations.ingestInbound({
             orgId: channel.orgId,
             channelId: channel.id,
             platform: 'WHATSAPP',
@@ -222,15 +222,23 @@ export class WebhookService {
             },
           });
 
-          const replyMessage = aiResponse.private_dm || aiResponse.public_reply || 'Thanks for contacting us!';
+          const replyMessage = aiResponse.private_dm || aiResponse.public_reply;
 
-          await this.metaPublisher.sendWhatsAppMessage(
-            phoneNumberId,
-            fromWaId,
-            replyMessage,
-            decryptedToken,
-            undefined,
-          );
+          if (replyMessage) {
+            const sent = await this.metaPublisher.sendWhatsAppMessage(
+              phoneNumberId,
+              fromWaId,
+              replyMessage,
+              decryptedToken,
+              undefined,
+            );
+            if (sent)
+              await this.recordAutoReply(
+                channel.orgId,
+                conversation.id,
+                replyMessage,
+              );
+          }
 
           await this.prisma.interactionLog
             .create({
@@ -379,7 +387,7 @@ export class WebhookService {
         const text = msg.message?.text;
         if (!text || !senderId) continue;
 
-        await this.conversations.ingestInbound({
+        const conversation = await this.conversations.ingestInbound({
           orgId: channel.orgId,
           channelId: channel.id,
           platform: 'FACEBOOK',
@@ -398,7 +406,18 @@ export class WebhookService {
         });
 
         if (aiResponse.private_dm) {
-          await this.metaPublisher.sendFacebookMessengerDm(pageId, senderId, aiResponse.private_dm, decryptedToken);
+          const sent = await this.metaPublisher.sendFacebookMessengerDm(
+            pageId,
+            senderId,
+            aiResponse.private_dm,
+            decryptedToken,
+          );
+          if (sent)
+            await this.recordAutoReply(
+              channel.orgId,
+              conversation.id,
+              aiResponse.private_dm,
+            );
         }
 
         await this.prisma.interactionLog
@@ -555,7 +574,7 @@ export class WebhookService {
     if (!(await this.claimEvent(mid, 'instagram_dm'))) return;
     if (!text || !senderId) return;
 
-    await this.conversations.ingestInbound({
+    const conversation = await this.conversations.ingestInbound({
       orgId,
       channelId,
       platform: 'INSTAGRAM',
@@ -578,7 +597,17 @@ export class WebhookService {
     });
 
     if (aiResponse.private_dm) {
-      await this.metaPublisher.sendPrivateDm(senderId, aiResponse.private_dm, accessToken);
+      const sent = await this.metaPublisher.sendPrivateDm(
+        senderId,
+        aiResponse.private_dm,
+        accessToken,
+      );
+      if (sent)
+        await this.recordAutoReply(
+          orgId,
+          conversation.id,
+          aiResponse.private_dm,
+        );
     }
 
     await this.prisma.interactionLog
@@ -597,6 +626,19 @@ export class WebhookService {
         },
       })
       .catch((e) => this.logger.error(`Failed to log interaction: ${e.message}`));
+  }
+
+  // Auto-replies belong in the thread too, or the inbox shows only one side.
+  private async recordAutoReply(
+    orgId: string,
+    conversationId: string,
+    text: string,
+  ) {
+    await this.conversations
+      .ingestOutbound(orgId, conversationId, text, 'AI')
+      .catch((e) =>
+        this.logger.error(`Failed to record auto-reply: ${e.message}`),
+      );
   }
 
   async simulateInteraction(data: {

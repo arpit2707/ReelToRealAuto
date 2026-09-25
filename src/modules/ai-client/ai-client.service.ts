@@ -54,14 +54,17 @@ export class AiClientService {
 
       return (await response.json()) as GeneratedReplyResult;
     } catch (error: any) {
-      this.logger.error(`Failed to reach Personalised-AI microservice: ${error.message}`);
-      // Fallback
+      this.logger.error(
+        `Failed to reach Personalised-AI microservice: ${error.message}`,
+      );
+      // No canned auto-reply: a public "sent you a DM" with an empty DM behind
+      // it, repeated on every message, reads as spam. Leave it for a human.
       return {
-        public_reply: 'Hey! Sent you a DM with the complete details! ✨🛍️',
-        private_dm: 'Hello! Thank you for reaching out. We will get back to you with the details shortly.',
-        intent: 'fallback',
+        public_reply: null,
+        private_dm: null,
+        intent: 'ai_unavailable',
         sentiment: 'neutral',
-        requires_human_attention: false,
+        requires_human_attention: true,
       };
     }
   }

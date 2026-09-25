@@ -28,6 +28,17 @@ export class MetaOAuthService implements OnModuleInit {
     await this.seedEnvChannels();
   }
 
+  // Env seeding must never take a channel back from a workspace that connected it.
+  private async ownedElsewhere(
+    platform: 'FACEBOOK' | 'WHATSAPP',
+    channelIdentifier: string,
+  ) {
+    const row = await this.prisma.channel.findUnique({
+      where: { platform_channelIdentifier: { platform, channelIdentifier } },
+    });
+    return !!row && row.orgId !== 'org_default';
+  }
+
   async seedEnvChannels() {
     try {
       const defaultOrg = await this.prisma.organization.upsert({
@@ -40,7 +51,11 @@ export class MetaOAuthService implements OnModuleInit {
         },
       });
 
-      if (process.env.PAGE_ID_MEME_WORLD && process.env.PAGE_TOKEN_MEME_WORLD) {
+      if (
+        process.env.PAGE_ID_MEME_WORLD &&
+        process.env.PAGE_TOKEN_MEME_WORLD &&
+        !(await this.ownedElsewhere('FACEBOOK', process.env.PAGE_ID_MEME_WORLD))
+      ) {
         await this.connectChannel(defaultOrg.id, {
           platform: 'FACEBOOK',
           channelIdentifier: process.env.PAGE_ID_MEME_WORLD,
@@ -51,7 +66,14 @@ export class MetaOAuthService implements OnModuleInit {
         this.logger.log(`Synced Page Meme World (${process.env.PAGE_ID_MEME_WORLD}) to Supabase Channel Vault`);
       }
 
-      if (process.env.PAGE_ID_DESI_MEME_FACTORY && process.env.PAGE_TOKEN_DESI_MEME_FACTORY) {
+      if (
+        process.env.PAGE_ID_DESI_MEME_FACTORY &&
+        process.env.PAGE_TOKEN_DESI_MEME_FACTORY &&
+        !(await this.ownedElsewhere(
+          'FACEBOOK',
+          process.env.PAGE_ID_DESI_MEME_FACTORY,
+        ))
+      ) {
         await this.connectChannel(defaultOrg.id, {
           platform: 'FACEBOOK',
           channelIdentifier: process.env.PAGE_ID_DESI_MEME_FACTORY,
@@ -62,7 +84,14 @@ export class MetaOAuthService implements OnModuleInit {
         this.logger.log(`Synced Page Desi Meme Factory (${process.env.PAGE_ID_DESI_MEME_FACTORY}) to Supabase Channel Vault`);
       }
 
-      if (process.env.WHATSAPP_PHONE_NUMBER_ID && process.env.WHATSAPP_ACCESS_TOKEN) {
+      if (
+        process.env.WHATSAPP_PHONE_NUMBER_ID &&
+        process.env.WHATSAPP_ACCESS_TOKEN &&
+        !(await this.ownedElsewhere(
+          'WHATSAPP',
+          process.env.WHATSAPP_PHONE_NUMBER_ID,
+        ))
+      ) {
         await this.connectChannel(defaultOrg.id, {
           platform: 'WHATSAPP',
           channelIdentifier: process.env.WHATSAPP_PHONE_NUMBER_ID,
@@ -187,7 +216,12 @@ export class MetaOAuthService implements OnModuleInit {
         },
       },
     });
-    if (existing && existing.orgId !== cleanOrgId) {
+    // Channels seeded from env vars live in the placeholder org nobody can log
+    // into, and a disconnected channel is not in use by anyone, so both may move
+    // to the workspace connecting them. Anything else stays with its owner.
+    const movable =
+      existing && (existing.orgId === 'org_default' || !existing.isActive);
+    if (existing && existing.orgId !== cleanOrgId && !movable) {
       // A plain Error surfaces as an opaque 500. This is a conflict the caller
       // can act on, so name the asset and return 409.
       throw new ConflictException(

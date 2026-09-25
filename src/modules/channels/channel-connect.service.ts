@@ -1,4 +1,11 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
@@ -39,7 +46,10 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
 
   async createStartUrl(provider: ConnectProvider, orgId: string, userId: string) {
     if (!this.appId() || !this.appSecret()) {
-      throw new UnauthorizedException('META_APP_ID / META_APP_SECRET missing');
+      // Not a 401: the webapp treats 401 as an expired session and logs the user out.
+      throw new ServiceUnavailableException(
+        'Meta app is not configured on the server (META_APP_ID / META_APP_SECRET)',
+      );
     }
     const state = crypto.randomBytes(24).toString('hex');
     await this.prisma.oauthState.create({
@@ -177,7 +187,10 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
     const connection = await this.prisma.metaConnection.findFirst({
       where: { id: connectionId, orgId },
     });
-    if (!connection) throw new UnauthorizedException('Connection not found');
+    if (!connection)
+      throw new NotFoundException(
+        'Connection not found. Start the connect flow again.',
+      );
     const token = this.crypto.decrypt(connection.userTokenEncrypted);
     if (connection.provider === 'WHATSAPP_ESU') {
       return { connectionId, provider: connection.provider, whatsapp: await this.discoverWhatsApp(token) };
@@ -194,10 +207,18 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
     const connection = await this.prisma.metaConnection.findFirst({
       where: { id: connectionId, orgId },
     });
-    if (!connection) throw new UnauthorizedException('Connection not found');
+    if (!connection)
+      throw new NotFoundException(
+        'Connection not found. Start the connect flow again.',
+      );
     const userToken = this.crypto.decrypt(connection.userTokenEncrypted);
-    const pages = connection.provider === 'WHATSAPP_ESU' ? [] : await this.metaOAuth.fetchUserPages(userToken);
-    const created = [];
+    const pages =
+      connection.provider === 'WHATSAPP_ESU'
+        ? []
+        : await this.metaOAuth.fetchUserPages(userToken);
+    const created: any[] = [];
+    const warnings: Array<{ platform: string; id: string; reason: string }> =
+      [];
     // One bad asset used to abort the whole batch, discarding the channels that
     // had already connected and surfacing as a single opaque error. Each
     // selection is now independent, and the caller gets both lists back.
@@ -205,7 +226,14 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
 
     for (const item of selection) {
       try {
-        await this.connectOne(item, { orgId, connectionId, pages, userToken, created });
+        await this.connectOne(item, {
+          orgId,
+          connectionId,
+          pages,
+          userToken,
+          created,
+          warnings,
+        });
       } catch (error: any) {
         this.logger.warn(`Could not connect ${item.platform} ${item.id}: ${error?.message}`);
         failed.push({
@@ -215,7 +243,15 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
         });
       }
     }
-    return { connected: created.length, channels: created, failed };
+    // Never send token ciphertext (or any other vault column) to the browser.
+    const channels = created.map((c) => ({
+      id: c.id,
+      platform: c.platform,
+      channelIdentifier: c.channelIdentifier,
+      name: c.name,
+      status: c.status,
+    }));
+    return { connected: channels.length, channels, failed, warnings };
   }
 
   private async connectOne(
@@ -226,13 +262,24 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
       pages: DiscoveredPage[];
       userToken: string;
       created: any[];
+      warnings: Array<{ platform: string; id: string; reason: string }>;
     },
   ) {
-    const { orgId, connectionId, pages, userToken, created } = ctx;
+    const { orgId, connectionId, pages, userToken, created, warnings } = ctx;
+    const notSubscribed = (platform: string, id: string) =>
+      warnings.push({
+        platform,
+        id,
+        reason:
+          'Connected, but Meta refused the webhook subscription, so new messages will not arrive. Reconnect and grant every permission.',
+      });
     {
       if (item.platform === 'FACEBOOK') {
         const page = pages.find((p) => p.id === item.id);
-        if (!page?.access_token) return;
+        if (!page?.access_token)
+          throw new Error(
+            'This Page was not shared with Reel2Real. Reconnect and select it.',
+          );
         const channel = await this.metaOAuth.connectChannel(orgId, {
           platform: 'FACEBOOK',
           channelIdentifier: page.id,
@@ -244,15 +291,29 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
           data: { connectionId, graphVersion: graphVersion(), status: 'PENDING' },
         });
         const fields = await this.subscribePage(page.id, page.access_token);
-        await this.prisma.channel.update({
+        const updated = await this.prisma.channel.update({
           where: { id: channel.id },
-          data: { subscribedFields: fields, status: 'ACTIVE', lastHealthCheckAt: new Date() },
+          data: {
+            subscribedFields: fields,
+            status: 'ACTIVE',
+            lastHealthCheckAt: new Date(),
+            lastError: fields.length
+              ? undefined
+              : { reason: 'webhook_subscribe_failed' },
+          },
         });
-        created.push(channel);
+        if (!fields.length) notSubscribed('FACEBOOK', page.id);
+        created.push(updated);
       }
       if (item.platform === 'INSTAGRAM') {
-        const page = pages.find((p) => p.instagram_business_account?.id === item.id);
-        if (!page?.access_token || !page.instagram_business_account) return;
+        const page = pages.find(
+          (p) => p.instagram_business_account?.id === item.id,
+        );
+        if (!page?.access_token || !page.instagram_business_account) {
+          throw new Error(
+            'This Instagram account was not shared with Reel2Real. Reconnect and select its Facebook Page.',
+          );
+        }
         const channel = await this.metaOAuth.connectChannel(orgId, {
           platform: 'INSTAGRAM',
           channelIdentifier: page.instagram_business_account.id,
@@ -260,18 +321,22 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
           accessToken: page.access_token,
           metadata: { pageId: page.id, username: page.instagram_business_account.username },
         });
-        await this.subscribePage(page.id, page.access_token);
-        await this.prisma.channel.update({
+        const fields = await this.subscribePage(page.id, page.access_token);
+        const updated = await this.prisma.channel.update({
           where: { id: channel.id },
           data: {
             connectionId,
             graphVersion: graphVersion(),
             status: 'ACTIVE',
             handle: page.instagram_business_account.username,
-            subscribedFields: PAGE_FIELDS.split(','),
+            subscribedFields: fields,
+            lastError: fields.length
+              ? undefined
+              : { reason: 'webhook_subscribe_failed' },
           },
         });
-        created.push(channel);
+        if (!fields.length) notSubscribed('INSTAGRAM', item.id);
+        created.push(updated);
       }
       if (item.platform === 'WHATSAPP') {
         const channel = await this.metaOAuth.connectChannel(orgId, {
@@ -281,12 +346,22 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
           accessToken: userToken,
           metadata: item.wabaId ? { wabaId: item.wabaId } : undefined,
         });
-        await this.subscribeWaba(item.wabaId || item.id, userToken);
-        await this.prisma.channel.update({
+        const subscribed = item.wabaId
+          ? await this.subscribeWaba(item.wabaId, userToken)
+          : false;
+        const updated = await this.prisma.channel.update({
           where: { id: channel.id },
-          data: { connectionId, graphVersion: graphVersion(), status: 'ACTIVE' },
+          data: {
+            connectionId,
+            graphVersion: graphVersion(),
+            status: 'ACTIVE',
+            lastError: subscribed
+              ? undefined
+              : { reason: 'webhook_subscribe_failed' },
+          },
         });
-        created.push(channel);
+        if (!subscribed) notSubscribed('WHATSAPP', item.id);
+        created.push(updated);
       }
     }
   }
@@ -326,29 +401,47 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
     return { id: String(data.id), name: data.name || 'Meta user' };
   }
 
-  private async subscribePage(pageId: string, pageToken: string) {
+  private async subscribePage(
+    pageId: string,
+    pageToken: string,
+  ): Promise<string[]> {
     const fields = PAGE_FIELDS;
     const res = await fetch(graphUrl(`/${pageId}/subscribed_apps`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subscribed_fields: fields.split(','), access_token: pageToken }),
+      body: JSON.stringify({
+        subscribed_fields: fields.split(','),
+        access_token: pageToken,
+      }),
+    }).catch((err) => {
+      this.logger.warn(
+        `subscribed_apps failed for page ${pageId}: ${err.message}`,
+      );
+      return null;
     });
+    if (!res) return [];
     if (!res.ok) {
       this.logger.warn(`subscribed_apps failed for page ${pageId}: ${await res.text()}`);
       return [];
     }
-    const check = await fetch(`${graphUrl(`/${pageId}/subscribed_apps`)}?access_token=${encodeURIComponent(pageToken)}`);
-    if (!check.ok) this.logger.warn(`subscribed_apps verify failed for page ${pageId}`);
     return fields.split(',');
   }
 
-  private async subscribeWaba(wabaOrPhoneId: string, token: string) {
-    const res = await fetch(graphUrl(`/${wabaOrPhoneId}/subscribed_apps`), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ access_token: token }),
-    });
-    if (!res.ok) this.logger.warn(`WABA subscribed_apps failed: ${await res.text()}`);
+  // subscribed_apps lives on the WABA, not on the phone number id.
+  private async subscribeWaba(wabaId: string, token: string): Promise<boolean> {
+    try {
+      const res = await fetch(graphUrl(`/${wabaId}/subscribed_apps`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ access_token: token }),
+      });
+      if (!res.ok)
+        this.logger.warn(`WABA subscribed_apps failed: ${await res.text()}`);
+      return res.ok;
+    } catch (err: any) {
+      this.logger.warn(`WABA subscribed_apps failed: ${err.message}`);
+      return false;
+    }
   }
 
   private async discoverWhatsApp(token: string) {
@@ -391,8 +484,10 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
   }
 
   async disconnect(orgId: string, channelId: string) {
-    const channel = await this.prisma.channel.findFirst({ where: { id: channelId, orgId } });
-    if (!channel) throw new UnauthorizedException('Channel not found');
+    const channel = await this.prisma.channel.findFirst({
+      where: { id: channelId, orgId },
+    });
+    if (!channel) throw new NotFoundException('Channel not found');
     await this.unsubscribe(channel);
     const wiped = this.crypto.encrypt('REVOKED');
     await this.prisma.channel.update({
