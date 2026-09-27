@@ -8,6 +8,7 @@ import {
 import { ReplyContextService, type GoalState } from './reply-context.service';
 import { LeadsService } from './leads.service';
 import { unknownPrices } from './price-guard';
+import { automationBlock, serviceFor } from './onboarding';
 
 export type ReplyRequest = {
   orgId: string;
@@ -19,6 +20,8 @@ export type ReplyRequest = {
   senderName?: string | null;
   postId?: string | null;
   conversationId?: string | null;
+  // A seller trying the AI from the dashboard; works before onboarding too.
+  preview?: boolean;
 };
 
 export type ReplyOutcome = GeneratedReplyResult & {
@@ -52,6 +55,30 @@ export class ReplyEngineService {
   ) {}
 
   async reply(req: ReplyRequest): Promise<ReplyOutcome | null> {
+    const profile = await this.prisma.businessProfile.findUnique({
+      where: { orgId: req.orgId },
+      select: {
+        activatedAt: true,
+        services: true,
+        businessName: true,
+        audience: true,
+        replyTone: true,
+        replyLanguage: true,
+      },
+    });
+    // Nothing is sent until the seller has told us what the page is about and
+    // picked the automations they want. The message is still in the inbox.
+    const blocked = automationBlock(
+      profile,
+      serviceFor(req.platform, req.eventType),
+    );
+    if (blocked && !req.preview) {
+      this.logger.log(
+        `No auto-reply for org ${req.orgId} (${req.platform} ${req.eventType}): ${blocked}`,
+      );
+      return null;
+    }
+
     if (req.conversationId) {
       const convo = await this.prisma.conversation.findUnique({
         where: { id: req.conversationId },
@@ -82,7 +109,16 @@ export class ReplyEngineService {
       message_text: req.text,
       sender_id: req.senderId,
       ...(req.postId ? { post_context: { post_id: req.postId } } : {}),
-      brand_persona: { brand_name: req.brandName },
+      brand_persona: {
+        brand_name: profile?.businessName || req.brandName,
+        ...(profile?.replyTone ? { tone: profile.replyTone } : {}),
+        ...(profile?.replyLanguage
+          ? { language_mode: profile.replyLanguage }
+          : {}),
+        ...(profile?.audience
+          ? { custom_instructions: `Our customers: ${profile.audience}` }
+          : {}),
+      },
       business: ctx.business,
       playbook: ctx.playbook,
       offerings: ctx.offerings,

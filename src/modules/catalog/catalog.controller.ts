@@ -41,6 +41,19 @@ export class CatalogController {
     return this.catalog.saveProfile(user.orgId, body || {});
   }
 
+  /** Turns automation on once the business setup is complete. */
+  @Post('profile/activate')
+  @Roles('OWNER', 'ADMIN')
+  activate(@CurrentUser() user: JwtPayload) {
+    return this.catalog.activate(user.orgId);
+  }
+
+  @Post('profile/deactivate')
+  @Roles('OWNER', 'ADMIN')
+  deactivate(@CurrentUser() user: JwtPayload) {
+    return this.catalog.deactivate(user.orgId);
+  }
+
   @Get('offerings')
   offerings(@CurrentUser() user: JwtPayload, @Query('all') all?: string) {
     return this.catalog.listOfferings(user.orgId, {
@@ -173,6 +186,7 @@ export class CatalogController {
       senderId: 'preview',
       postId: body?.postId || null,
       conversationId: null,
+      preview: true,
     });
   }
 }

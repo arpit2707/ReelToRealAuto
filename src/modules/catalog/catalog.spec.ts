@@ -3,6 +3,7 @@ import { parseCsv } from './csv';
 import { priceLabel, industryOf } from './industries';
 import { tokens } from './reply-context.service';
 import { ReplyEngineService } from './reply-engine.service';
+import { missingForActivation, serviceFor } from './onboarding';
 
 describe('price guard', () => {
   it('reads rupee amounts in the ways Indian sellers write them', () => {
@@ -112,8 +113,19 @@ describe('ReplyEngineService', () => {
     allowed_prices: [18000],
   };
 
-  function make(ai: any, convo: any = { aiEnabled: true, goalState: null }) {
+  const activeProfile = {
+    activatedAt: new Date('2026-09-01'),
+    services: ['DM_REPLY', 'COMMENT_REPLY', 'WHATSAPP_REPLY'],
+    businessName: 'Glam by Riya',
+  };
+
+  function make(
+    ai: any,
+    convo: any = { aiEnabled: true, goalState: null },
+    profile: any = activeProfile,
+  ) {
     const prisma: any = {
+      businessProfile: { findUnique: jest.fn().mockResolvedValue(profile) },
       conversation: {
         findUnique: jest.fn().mockResolvedValue(convo),
         update: jest.fn().mockResolvedValue({}),
@@ -176,6 +188,47 @@ describe('ReplyEngineService', () => {
     expect(await engine.reply(req)).toBeNull();
   });
 
+  it('stays silent until the seller finishes onboarding', async () => {
+    const { engine } = make({ private_dm: 'hi' }, undefined, null);
+    expect(await engine.reply(req)).toBeNull();
+    const inactive = make({ private_dm: 'hi' }, undefined, {
+      ...activeProfile,
+      activatedAt: null,
+    });
+    expect(await inactive.engine.reply(req)).toBeNull();
+  });
+
+  it('only runs the automations the seller picked', async () => {
+    const { engine } = make({ private_dm: 'hi', public_reply: 'ok' }, undefined, {
+      ...activeProfile,
+      services: ['DM_REPLY'],
+    });
+    expect(await engine.reply(req)).toBeNull();
+    expect(await engine.reply({ ...req, eventType: 'dm' })).not.toBeNull();
+  });
+
+  it('lets the dashboard preview work before onboarding', async () => {
+    const { engine } = make({ private_dm: 'hi' }, undefined, null);
+    expect(
+      await engine.reply({ ...req, conversationId: null, preview: true }),
+    ).not.toBeNull();
+  });
+
+  it('sends the business name and tone to the AI', async () => {
+    const { engine } = make({ private_dm: 'hi' }, undefined, {
+      ...activeProfile,
+      replyTone: 'formal',
+      audience: 'Brides in Patna',
+    });
+    await engine.reply(req);
+    const sent = (engine as any).aiClient.generateReply.mock.calls[0][0];
+    expect(sent.brand_persona).toEqual({
+      brand_name: 'Glam by Riya',
+      tone: 'formal',
+      custom_instructions: 'Our customers: Brides in Patna',
+    });
+  });
+
   it('creates a complete lead once every required detail is in', async () => {
     const { engine, leads, prisma } = make(
       {
@@ -202,5 +255,35 @@ describe('ReplyEngineService', () => {
     expect(call.offeringId).toBe('o1');
     const saved = prisma.conversation.update.mock.calls[0][0].data.goalState;
     expect(saved.leadId).toBe('lead1');
+  });
+});
+
+describe('onboarding', () => {
+  it('lists what is missing before automation can start', () => {
+    expect(missingForActivation(null)).toEqual([
+      'businessName',
+      'description',
+      'services',
+    ]);
+    expect(
+      missingForActivation({
+        businessName: 'Glam by Riya',
+        description: 'Bridal and party makeup artist in Patna, home visits too',
+        services: ['DM_REPLY'],
+      }),
+    ).toEqual([]);
+    expect(
+      missingForActivation({
+        businessName: 'X',
+        description: 'too short',
+        services: ['NOPE'],
+      }),
+    ).toEqual(['description', 'services']);
+  });
+
+  it('maps each event to the service it needs', () => {
+    expect(serviceFor('INSTAGRAM', 'comment')).toBe('COMMENT_REPLY');
+    expect(serviceFor('FACEBOOK', 'dm')).toBe('DM_REPLY');
+    expect(serviceFor('WHATSAPP', 'dm')).toBe('WHATSAPP_REPLY');
   });
 });

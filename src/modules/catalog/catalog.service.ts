@@ -14,6 +14,12 @@ import {
   industryOf,
 } from './industries';
 import { parseCsv } from './csv';
+import {
+  REPLY_LANGUAGES,
+  REPLY_TONES,
+  SERVICES,
+  missingForActivation,
+} from './onboarding';
 
 const SHOPIFY_API_VERSION = '2024-10';
 
@@ -56,6 +62,11 @@ export type ProfileInput = {
   faqs?: Array<{ q: string; a: string }> | null;
   alertPhone?: string | null;
   autoTagPosts?: boolean;
+  businessName?: string | null;
+  audience?: string | null;
+  replyTone?: string | null;
+  replyLanguage?: string | null;
+  services?: string[];
 };
 
 const OFFERING_INCLUDE = {
@@ -87,6 +98,12 @@ export class CatalogService {
         industry: 'APPAREL',
         serviceAreas: [],
         autoTagPosts: true,
+        services: [],
+        activatedAt: null,
+      },
+      onboarding: {
+        active: Boolean(profile?.activatedAt),
+        missing: missingForActivation(profile),
       },
       template: industryOf(profile?.industry),
       industries: Object.values(INDUSTRIES).map((i) => ({
@@ -100,6 +117,23 @@ export class CatalogService {
   async saveProfile(orgId: string, input: ProfileInput) {
     if (input.industry && !INDUSTRIES[input.industry]) {
       throw new BadRequestException(`Unknown industry ${input.industry}`);
+    }
+    if (input.replyTone && !REPLY_TONES.includes(input.replyTone as never)) {
+      throw new BadRequestException(`Unknown reply tone ${input.replyTone}`);
+    }
+    if (
+      input.replyLanguage &&
+      !REPLY_LANGUAGES.includes(input.replyLanguage as never)
+    ) {
+      throw new BadRequestException(
+        `Unknown reply language ${input.replyLanguage}`,
+      );
+    }
+    const badService = input.services?.find(
+      (s) => !SERVICES.includes(s as never),
+    );
+    if (badService) {
+      throw new BadRequestException(`Unknown service ${badService}`);
     }
     const data = {
       industry: input.industry,
@@ -121,11 +155,45 @@ export class CatalogService {
           ? undefined
           : normalizePhone(input.alertPhone),
       autoTagPosts: input.autoTagPosts,
+      businessName: input.businessName?.trim() ?? input.businessName,
+      audience: input.audience,
+      replyTone: input.replyTone,
+      replyLanguage: input.replyLanguage,
+      services: input.services ? [...new Set(input.services)] : undefined,
     };
     await this.prisma.businessProfile.upsert({
       where: { orgId },
       update: data,
       create: { orgId, ...data, industry: input.industry || 'APPAREL' },
+    });
+    return this.getProfile(orgId);
+  }
+
+  /** Switches automation on once the seller has told us enough about the page. */
+  async activate(orgId: string) {
+    const profile = await this.prisma.businessProfile.findUnique({
+      where: { orgId },
+    });
+    const missing = missingForActivation(profile);
+    if (missing.length) {
+      throw new BadRequestException({
+        message: 'Finish the business setup before turning automation on',
+        missing,
+      });
+    }
+    if (!profile!.activatedAt) {
+      await this.prisma.businessProfile.update({
+        where: { orgId },
+        data: { activatedAt: new Date() },
+      });
+    }
+    return this.getProfile(orgId);
+  }
+
+  async deactivate(orgId: string) {
+    await this.prisma.businessProfile.updateMany({
+      where: { orgId },
+      data: { activatedAt: null },
     });
     return this.getProfile(orgId);
   }
