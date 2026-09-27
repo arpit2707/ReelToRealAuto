@@ -16,7 +16,7 @@ const page = (data: any[], after?: string) => ({
 });
 
 describe('InboxSyncService conversation fetch', () => {
-  const svc = new InboxSyncService({} as any, crypto as any) as any;
+  const svc = new InboxSyncService({} as any, crypto as any, { inboxChanged: jest.fn() } as any) as any;
   let fetchMock: jest.Mock;
 
   beforeEach(() => {

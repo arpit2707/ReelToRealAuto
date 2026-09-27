@@ -1,9 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RealtimeService } from '../realtime/realtime.service';
 
 @Injectable()
 export class ConversationService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly realtime: RealtimeService,
+  ) {}
 
   async ingestInbound(input: {
     orgId: string;
@@ -75,6 +79,11 @@ export class ConversationService {
       data: { lastInboundAt: new Date() },
     }).catch(() => undefined);
 
+    this.realtime.inboxChanged(input.orgId, {
+      kind: 'message',
+      conversationId: conversation.id,
+      platform: input.platform,
+    });
     return conversation;
   }
 
@@ -93,5 +102,6 @@ export class ConversationService {
       where: { id: conversationId },
       data: { lastOutboundAt: new Date() },
     });
+    this.realtime.inboxChanged(orgId, { kind: 'message', conversationId });
   }
 }

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { graphUrl } from '../../common/graph';
+import { RealtimeService } from '../realtime/realtime.service';
 
 // Meta sizes a Conversations API call by conversations × nested messages and
 // rejects large ones with "Please reduce the amount of data you're asking for"
@@ -30,6 +31,7 @@ export class InboxSyncService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
+    private readonly realtime: RealtimeService,
   ) {}
 
   async syncOrg(orgId: string, platform?: string): Promise<SyncResult[]> {
@@ -47,7 +49,15 @@ export class InboxSyncService {
       if (channel.platform !== 'FACEBOOK' && channel.platform !== 'INSTAGRAM')
         continue;
       try {
-        results.push(await this.syncChannel(channel));
+        const result = await this.syncChannel(channel);
+        results.push(result);
+        // One event per channel, not per message: an import can add hundreds.
+        if (result.conversations || result.messages) {
+          this.realtime.inboxChanged(orgId, {
+            kind: 'sync',
+            platform: channel.platform,
+          });
+        }
       } catch (err: any) {
         this.logger.warn(
           `Inbox sync failed for ${channel.platform} ${channel.channelIdentifier}: ${err.message}`,

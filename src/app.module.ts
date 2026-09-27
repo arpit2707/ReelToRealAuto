@@ -18,10 +18,12 @@ import { WorkspaceModule } from './modules/workspace/workspace.module';
 import { StoriesModule } from './modules/stories/stories.module';
 import { PostsModule } from './modules/posts/posts.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
+import { RealtimeModule } from './modules/realtime/realtime.module';
 
 @Module({
   imports: [
     PrismaModule,
+    RealtimeModule,
     CryptoModule,
     WebhookModule,
     AiClientModule,

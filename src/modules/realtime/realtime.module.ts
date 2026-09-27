@@ -1,0 +1,11 @@
+import { Global, Module } from '@nestjs/common';
+import { RealtimeGateway } from './realtime.gateway';
+import { RealtimeService } from './realtime.service';
+
+// Global so any service can announce a change without import wiring.
+@Global()
+@Module({
+  providers: [RealtimeGateway, RealtimeService],
+  exports: [RealtimeService],
+})
+export class RealtimeModule {}

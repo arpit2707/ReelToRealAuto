@@ -37,6 +37,7 @@ describe('InboxService.reply', () => {
       crypto as any,
       metaPublisher as any,
       conversations as any,
+      { inboxChanged: jest.fn() } as any,
     );
     return { service, metaPublisher, conversations };
   }
