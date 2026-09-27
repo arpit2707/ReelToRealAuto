@@ -9,6 +9,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { MetaPublisherService } from '../meta-publisher/meta-publisher.service';
 import { ConversationService } from '../conversations/conversation.service';
+import { RealtimeService } from '../realtime/realtime.service';
 import type { JwtPayload } from '../auth/jwt';
 
 @Injectable()
@@ -18,6 +19,7 @@ export class InboxService {
     private readonly crypto: CryptoService,
     private readonly metaPublisher: MetaPublisherService,
     private readonly conversations: ConversationService,
+    private readonly realtime: RealtimeService,
   ) {}
 
   async listChannels(orgId: string) {
@@ -96,6 +98,11 @@ export class InboxService {
         aiEnabled: enabled,
         goalState: goalState as Prisma.InputJsonValue,
       },
+    });
+    // Other open dashboards of this org should see the toggle too.
+    this.realtime.inboxChanged(orgId, {
+      kind: 'conversation',
+      conversationId: updated.id,
     });
     return { id: updated.id, aiPaused: aiPaused(updated) };
   }
