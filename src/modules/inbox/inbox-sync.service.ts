@@ -3,8 +3,13 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { graphUrl } from '../../common/graph';
 
-const CONVERSATION_LIMIT = 25;
-const MESSAGE_LIMIT = 25;
+// Meta sizes a Conversations API call by conversations × nested messages and
+// rejects large ones with "Please reduce the amount of data you're asking for"
+// (error code 1). 25 × 25 failed for busy Pages, so pages are small, the size
+// is halved on that error, and later pages are followed via paging.next.
+const CONVERSATIONS_PER_PAGE = 10;
+const MESSAGE_LIMIT = 20;
+const MAX_CONVERSATIONS = 50;
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
 type SyncResult = {
@@ -71,13 +76,45 @@ export class InboxSyncService {
     });
     const json: any = await res.json().catch(() => ({}));
     if (!res.ok || json.error) {
-      throw new Error(
+      const err: Error & { tooMuchData?: boolean } = new Error(
         json?.error?.error_user_msg ||
           json?.error?.message ||
           `Graph API error ${res.status}`,
       );
+      err.tooMuchData =
+        json?.error?.code === 1 && /reduce the amount of data/i.test(json?.error?.message || '');
+      throw err;
     }
     return json;
+  }
+
+  private async fetchConversations(pageId: string, isIg: boolean, token: string) {
+    let perPage = CONVERSATIONS_PER_PAGE;
+    let messageLimit = MESSAGE_LIMIT;
+    let after: string | undefined;
+    const out: any[] = [];
+    while (out.length < MAX_CONVERSATIONS) {
+      const params: Record<string, string> = {
+        fields: `id,updated_time,participants,messages.limit(${messageLimit}){id,message,from,created_time}`,
+        limit: String(Math.min(perPage, MAX_CONVERSATIONS - out.length)),
+      };
+      if (isIg) params.platform = 'instagram';
+      if (after) params.after = after;
+      let json: any;
+      try {
+        json = await this.graphGet(`/${pageId}/conversations`, params, token);
+      } catch (err: any) {
+        if (!err.tooMuchData) throw err;
+        if (perPage > 1) perPage = Math.ceil(perPage / 2);
+        else if (messageLimit > 5) messageLimit = Math.ceil(messageLimit / 2);
+        else throw err;
+        continue;
+      }
+      out.push(...(json.data || []));
+      after = json.paging?.next ? json.paging?.cursors?.after : undefined;
+      if (!after || !(json.data || []).length) break;
+    }
+    return out;
   }
 
   private async syncChannel(channel: {
@@ -103,16 +140,11 @@ export class InboxSyncService {
       );
     const selfIds = new Set([channel.channelIdentifier, pageId]);
 
-    const params: Record<string, string> = {
-      fields: `id,updated_time,participants,messages.limit(${MESSAGE_LIMIT}){id,message,from,created_time}`,
-      limit: String(CONVERSATION_LIMIT),
-    };
-    if (isIg) params.platform = 'instagram';
-    const json = await this.graphGet(`/${pageId}/conversations`, params, token);
+    const convs = await this.fetchConversations(pageId, isIg, token);
 
     let conversations = 0;
     let messages = 0;
-    for (const conv of json.data || []) {
+    for (const conv of convs) {
       const participants: any[] = conv.participants?.data || [];
       const peer = participants.find(
         (p) => p?.id && !selfIds.has(String(p.id)),
