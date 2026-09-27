@@ -29,6 +29,6 @@ import { PostTaggingService } from './post-tagging.service';
     PostTaggingService,
     RolesGuard,
   ],
-  exports: [ReplyEngineService, CatalogService],
+  exports: [ReplyEngineService, CatalogService, PostTaggingService],
 })
 export class CatalogModule {}

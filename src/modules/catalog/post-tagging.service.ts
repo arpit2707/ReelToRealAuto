@@ -7,6 +7,8 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { reel2realSender } from '../../common/wa-sender';
+import { MetaPublisherService } from '../meta-publisher/meta-publisher.service';
 import { PostsService, type ChannelPost } from '../posts/posts.service';
 import { GeminiClient } from '../stories/gemini.client';
 import { ReplyContextService } from './reply-context.service';
@@ -19,6 +21,13 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // How often the scheduler checks which orgs are due; each org still runs once a day.
 const TICK_MS = 60 * 60 * 1000;
 const MAX_NOTE = 500;
+// WhatsApp "is this the item?" buttons on a fresh post's best AI tag.
+const TAG_YES_PREFIX = 'TAG_YES_';
+const TAG_NO_PREFIX = 'TAG_NO_';
+// Only posts this new are worth a question; older ones wait for the dashboard.
+const FRESH_POST_MS = 3 * DAY_MS;
+// A seller who posts a lot should not get a stream of questions.
+const MAX_ASKS_PER_DAY = 3;
 
 type Suggestion = { offeringId: string; confidence: number; reason: string };
 
@@ -38,13 +47,18 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     private readonly posts: PostsService,
     private readonly gemini: GeminiClient,
     private readonly context: ReplyContextService,
+    private readonly metaPublisher: MetaPublisherService,
   ) {}
 
   onModuleInit() {
     if (process.env.NODE_ENV === 'test') return;
     // Hourly check against the last saved run, so a restart does not push the
     // daily run back by a day (a 24h timer restarts from zero on every deploy).
-    this.timer = setInterval(() => void this.runDue(), TICK_MS);
+    // The same tick picks up new Instagram posts, which have no webhook.
+    this.timer = setInterval(() => {
+      void this.runDue();
+      void this.scanNewPosts().catch((e) => this.logger.error(`New post scan failed: ${e.message}`));
+    }, TICK_MS);
   }
 
   onModuleDestroy() {
@@ -192,8 +206,9 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     }
 
     const suggestions = await this.suggest(orgId, post);
+    const created: Array<{ id: string; offeringId: string; confidence: number }> = [];
     for (const s of suggestions) {
-      await this.prisma.postOfferingLink.create({
+      const link = await this.prisma.postOfferingLink.create({
         data: {
           orgId,
           postId: post.id,
@@ -209,9 +224,185 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
           commentsCount: post.commentsCount,
         },
       });
+      created.push({ id: link.id, offeringId: s.offeringId, confidence: s.confidence });
     }
     await this.rememberPost(orgId, channel, post, new Date());
+    const best = created.sort((a, b) => b.confidence - a.confidence)[0];
+    if (best && isFresh(post)) {
+      await this.askSeller(orgId, post, best).catch((e) =>
+        this.logger.warn(`Asking the seller about post ${post.id} failed: ${e.message}`),
+      );
+    }
     return suggestions.length;
+  }
+
+  // ------------------------------------------------ zero-click confirmation
+
+  /**
+   * Instagram sends no webhook for a new post, so each hour this looks at the
+   * newest posts of orgs that can be asked on WhatsApp and tags the ones it has
+   * not seen. Only fresh posts: the daily run covers the back catalogue.
+   */
+  async scanNewPosts(now = new Date()) {
+    const orgs = await this.prisma.businessProfile.findMany({
+      where: { autoTagPosts: true },
+      select: { orgId: true },
+    });
+    let tagged = 0;
+    for (const { orgId } of orgs) {
+      if (!(await this.sellerNumber(orgId))) continue;
+      if (!(await this.prisma.offering.count({ where: { orgId, isActive: true } }))) continue;
+      const channels = await this.prisma.channel.findMany({
+        where: { orgId, isActive: true, platform: 'INSTAGRAM', status: { not: 'DISCONNECTED' } },
+        select: { id: true, platform: true },
+      });
+      for (const ch of channels) {
+        try {
+          const { posts } = await this.posts.listPosts(orgId, ch.id);
+          const fresh = posts.filter((p) => isFresh(p, now));
+          if (!fresh.length) continue;
+          const known = new Set(
+            (
+              await this.prisma.socialPost.findMany({
+                where: { orgId, postId: { in: fresh.map((p) => p.id) } },
+                select: { postId: true },
+              })
+            ).map((k) => k.postId),
+          );
+          for (const post of fresh.filter((p) => !known.has(p.id))) {
+            tagged += await this.tagPost(orgId, ch, post);
+          }
+        } catch (e: any) {
+          this.logger.warn(`New post scan for ${orgId}/${ch.id} failed: ${e.message}`);
+        }
+      }
+    }
+    return tagged;
+  }
+
+  /**
+   * "Aapne nayi post daali hai! Kya isme Kashmiri Silk Saree (₹2,499) hai?"
+   * [Haan, yahi hai] [Nahi]. One question per post, a few per day at most.
+   */
+  private async askSeller(
+    orgId: string,
+    post: ChannelPost,
+    best: { id: string; offeringId: string },
+  ) {
+    const sender = reel2realSender();
+    const to = await this.sellerNumber(orgId);
+    if (!sender || !to) return;
+    const since = new Date(Date.now() - DAY_MS);
+    const askedToday = await this.prisma.postOfferingLink.count({
+      where: { orgId, askedAt: { gt: since } },
+    });
+    if (askedToday >= MAX_ASKS_PER_DAY) return;
+    const alreadyAsked = await this.prisma.postOfferingLink.count({
+      where: { orgId, postId: post.id, askedAt: { not: null } },
+    });
+    if (alreadyAsked) return;
+    const offering = await this.prisma.offering.findFirst({
+      where: { id: best.offeringId, orgId },
+      select: { title: true, priceMode: true, priceMin: true, priceMax: true, currency: true },
+    });
+    if (!offering) return;
+
+    // Claim first so two overlapping runs never ask twice.
+    const claimed = await this.prisma.postOfferingLink.updateMany({
+      where: { id: best.id, askedAt: null },
+      data: { askedAt: new Date() },
+    });
+    if (!claimed.count) return;
+
+    const item = `${offering.title} (${priceLabel(offering)})`;
+    const snippet = post.text ? `: "${post.text.replace(/\s+/g, ' ').slice(0, 80)}${post.text.length > 80 ? '…' : ''}"` : '';
+    const body =
+      `Aapne nayi post daali hai${snippet}\n\n` +
+      `Kya isme *${item}* hai? "Haan" dabate hi is post ke comments me isi ka price aur details bataye jayenge.`;
+    const buttons = [
+      { id: `${TAG_YES_PREFIX}${best.id}`, title: 'Haan, yahi hai' },
+      { id: `${TAG_NO_PREFIX}${best.id}`, title: 'Nahi' },
+    ];
+    const isPhoto = post.mediaUrl && post.mediaType !== 'VIDEO';
+    let sent = isPhoto
+      ? await this.metaPublisher.sendWhatsAppImageButtons(sender.phoneNumberId, to, post.mediaUrl!, body, buttons, sender.accessToken)
+      : await this.metaPublisher.sendInteractiveButtonMessage(
+          sender.phoneNumberId,
+          to,
+          'Nayi post',
+          body,
+          'Reel2Real',
+          buttons,
+          sender.accessToken,
+        );
+    // Buttons only work inside WhatsApp's 24h window; outside it, an approved
+    // template with the same two quick replies can carry the question.
+    const template = process.env.POST_TAG_WA_TEMPLATE;
+    if (!sent && template) {
+      sent = await this.metaPublisher.sendWhatsAppTemplate(
+        sender.phoneNumberId,
+        to,
+        template,
+        process.env.STORY_WA_TEMPLATE_LANG || 'en',
+        [
+          { type: 'body', parameters: [{ type: 'text', text: item }] },
+          ...buttons.map((b, index) => ({
+            type: 'button',
+            sub_type: 'quick_reply',
+            index: String(index),
+            parameters: [{ type: 'payload', payload: b.id }],
+          })),
+        ],
+        sender.accessToken,
+      );
+    }
+    if (!sent) {
+      // Not asked after all; the tag stays in the dashboard for review.
+      await this.prisma.postOfferingLink.updateMany({ where: { id: best.id }, data: { askedAt: null } });
+    }
+  }
+
+  /** The seller's WhatsApp: the daily-posts number, else the lead alert number. */
+  private async sellerNumber(orgId: string): Promise<string | null> {
+    const [settings, profile] = await Promise.all([
+      this.prisma.storySettings.findUnique({ where: { orgId }, select: { whatsappNumber: true } }),
+      this.prisma.businessProfile.findUnique({ where: { orgId }, select: { alertPhone: true } }),
+    ]);
+    return settings?.whatsappNumber || profile?.alertPhone?.replace(/\D/g, '') || null;
+  }
+
+  /** True for the Haan / Nahi buttons of a tag question. */
+  isTagAnswer(msg: any): boolean {
+    const id = replyId(msg);
+    return Boolean(id && (id.startsWith(TAG_YES_PREFIX) || id.startsWith(TAG_NO_PREFIX)));
+  }
+
+  /** "Haan" confirms the tag for the comment replies; "Nahi" rejects it. */
+  async handleTagAnswer(msg: any) {
+    const id = replyId(msg) || '';
+    const yes = id.startsWith(TAG_YES_PREFIX);
+    const linkId = id.slice((yes ? TAG_YES_PREFIX : TAG_NO_PREFIX).length);
+    const from = String(msg?.from || '');
+    const link = await this.prisma.postOfferingLink.findUnique({
+      where: { id: linkId },
+      include: { offering: { select: { title: true } } },
+    });
+    // Only the number we asked may answer for the org.
+    if (!link || (await this.sellerNumber(link.orgId)) !== from) return;
+    await this.setStatus(link.orgId, link.id, yes ? 'SELLER_CONFIRMED' : 'SELLER_REJECTED');
+    if (yes) {
+      await this.prisma.postOfferingLink.update({ where: { id: link.id }, data: { confidence: 1 } });
+    }
+    const sender = reel2realSender();
+    if (!sender) return;
+    await this.metaPublisher.sendWhatsAppMessage(
+      sender.phoneNumberId,
+      from,
+      yes
+        ? `Ho gaya! Is post ke comments me ab "${link.offering?.title}" ka price aur details bataye jayenge.`
+        : 'Theek hai, yeh tag hata diya. Sahi item dashboard ke "Post tags" me chun sakte hain.',
+      sender.accessToken,
+    );
   }
 
   /** Stores the caption and media for the reply context; keeps the seller's note. */
@@ -537,6 +728,16 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
         score: l.score,
       }));
   }
+}
+
+function isFresh(post: { createdAt: string | null }, now = new Date()): boolean {
+  if (!post.createdAt) return false;
+  const at = new Date(post.createdAt).getTime();
+  return !Number.isNaN(at) && now.getTime() - at < FRESH_POST_MS;
+}
+
+function replyId(msg: any): string | undefined {
+  return msg?.button?.payload || msg?.interactive?.button_reply?.id;
 }
 
 async function fetchImage(

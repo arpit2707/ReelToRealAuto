@@ -3,7 +3,7 @@ import { WebhookService } from './webhook.service';
 
 describe('WebhookService.verifySignature', () => {
   const makeService = () =>
-    new WebhookService({} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any);
+    new WebhookService({} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any);
 
   afterEach(() => {
     delete process.env.META_APP_SECRET;
@@ -42,7 +42,8 @@ describe('WebhookService WhatsApp story routing', () => {
       isStoryReply: jest.fn((msg: any) => Boolean(msg.button)),
       handleWhatsAppReply: jest.fn().mockResolvedValue(undefined),
     };
-    const service = new WebhookService(prisma, {} as any, {} as any, {} as any, {} as any, {} as any, stories, {} as any);
+    const postTagging: any = { isTagAnswer: () => false };
+    const service = new WebhookService(prisma, {} as any, {} as any, {} as any, {} as any, {} as any, stories, {} as any, postTagging);
     const storyMsg = { id: 'wamid.1', from: '919876543210', button: { payload: 'STORY_SHOW_b1' } };
 
     await service.processWebhookEvent({

@@ -4,9 +4,11 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { MetaPublisherService } from '../meta-publisher/meta-publisher.service';
 import { timingSafeEqualString } from '../../common/hmac';
+import { reel2realSender, type WaSender } from '../../common/wa-sender';
 import { GeminiClient } from './gemini.client';
 import { KeywordResearchService } from './keyword-research.service';
 import { overlayText, toFeedJpeg, toPaddedStoryJpeg, toStoryJpeg } from './story-image';
+import { toReelMp4 } from './story-video';
 
 export const OPTION_COUNT = 5;
 const MIN_OPTIONS = 4;
@@ -20,7 +22,11 @@ const EDIT_PREFIX = 'STORY_EDIT_';
 const NOW_PREFIX = 'STORY_NOW_';
 const TOMORROW_PREFIX = 'STORY_TMRW_';
 const CANCEL_PREFIX = 'STORY_CANCEL_';
-const OPTION_PREFIXES = [POST_PREFIX, PICK_PREFIX, EDIT_PREFIX, NOW_PREFIX, TOMORROW_PREFIX];
+// "Edit caption" on the scheduled-post preview.
+const CAPTION_PREFIX = 'STORY_CAP_';
+// "Edit cancel" while the merchant is describing a change.
+const EDIT_CANCEL_PREFIX = 'STORY_EDITX_';
+const OPTION_PREFIXES = [POST_PREFIX, PICK_PREFIX, EDIT_PREFIX, CAPTION_PREFIX, NOW_PREFIX, TOMORROW_PREFIX];
 // Statuses from which the merchant may still pick (or re-pick); FAILED lets them retry.
 const PICKABLE = ['NOTIFIED', 'AWAITING_PICK', 'SCHEDULED', 'FAILED'];
 // "Send today's ideas now" must not throw away a pick or a post that went out.
@@ -33,16 +39,25 @@ const MIN_SCHEDULE_AHEAD_MS = 2 * 60 * 1000;
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 const CAPTION_EDIT = /^caption\s*[:\-]\s*/i;
 const CANCEL_TEXT = /^(cancel|cancel karo|ruko|stop)$/i;
-export const DESTINATIONS = ['IG_STORY', 'IG_FEED', 'FB_FEED'] as const;
+// Ways of saying "never mind" while in edit mode. Only read then, so a word
+// like "nahi" in a normal chat is never taken as a command.
+const EDIT_CANCEL_TEXT =
+  /^(cancel|cancel karo|cancel kar do|rehne do|rehne dijiye|rahne do|chhodo|chodo|chhod do|skip|stop|ruko|nahi|nahin|no|mat karo|band karo|kuch nahi|koi nahi|never ?mind)[.!\s]*$/i;
+// Edit mode lapses, so a message hours later is not read as an edit.
+const EDIT_TTL_MS = 30 * 60 * 1000;
+// Room left in a WhatsApp interactive body (1024) around the preview caption.
+const PREVIEW_CAPTION_CHARS = 600;
+export const DESTINATIONS = ['IG_STORY', 'IG_FEED', 'IG_REEL', 'FB_FEED'] as const;
 export type Destination = (typeof DESTINATIONS)[number];
 const DESTINATION_NAMES: Record<Destination, string> = {
   IG_STORY: 'Instagram story',
   IG_FEED: 'Instagram post',
+  IG_REEL: 'Instagram reel',
   FB_FEED: 'Facebook post',
 };
 
-type Sender = { phoneNumberId: string; accessToken: string };
-export type MediaVariant = 'draft' | 'final' | 'feed';
+export type MediaVariant = 'draft' | 'final' | 'feed' | 'reel';
+type EditMode = 'IMAGE' | 'CAPTION';
 type TargetResult = { ok: boolean; id?: string; error?: string };
 // When a picked post goes live: a moment, or right away.
 type When = Date | 'now';
@@ -284,19 +299,23 @@ export class StoriesService {
   }
 
   /**
-   * Creates today's batch for one org and notifies the merchant. Idempotent per
-   * day: an existing batch is kept unless it failed or `force` is set, and even
-   * `force` keeps a batch that is scheduled or already published.
+   * Creates today's batch for one org. Idempotent per day: an existing batch is
+   * kept unless it failed or `force` is set, and even `force` keeps a batch that
+   * is scheduled or already published.
+   *
+   * `via: 'whatsapp'` (the daily run) sends the ideas to the merchant's number.
+   * `via: 'web'` only makes them, for picking in the dashboard: no WhatsApp
+   * number or sender needed, e.g. for an agency or staff planning on a laptop.
    */
-  async generateBatch(orgId: string, opts: { force?: boolean } = {}) {
-    const sender = this.sender();
-    if (!sender) throw new Error('Story WhatsApp sender is not configured');
+  async generateBatch(orgId: string, opts: { force?: boolean; via?: 'whatsapp' | 'web' } = {}) {
+    const viaWhatsApp = opts.via !== 'web';
+    if (viaWhatsApp && !this.sender()) throw new Error('Story WhatsApp sender is not configured');
     if (!this.gemini.isConfigured()) throw new Error('GEMINI_API_KEY is not set');
 
-    const settings = await this.prisma.storySettings.findUnique({
+    const settings = (await this.prisma.storySettings.findUnique({
       where: { orgId },
-    });
-    if (!settings?.whatsappNumber) throw new Error('No WhatsApp number set for daily posts');
+    })) || (await this.getSettings(orgId));
+    if (viaWhatsApp && !settings.whatsappNumber) throw new Error('No WhatsApp number set for daily posts');
     const org = await this.prisma.organization.findUnique({
       where: { id: orgId },
     });
@@ -326,7 +345,7 @@ export class StoriesService {
         forDate,
         kind: 'DAILY',
         status: 'GENERATING',
-        waRecipient: settings.whatsappNumber,
+        waRecipient: viaWhatsApp ? settings.whatsappNumber : null,
       },
     });
 
@@ -409,7 +428,13 @@ export class StoriesService {
         });
       }
 
-      const sent = await this.sendIdeasTemplate(settings.whatsappNumber, org.name, batch.id);
+      if (!viaWhatsApp) {
+        return this.prisma.storyBatch.update({
+          where: { id: batch.id },
+          data: { status: 'AWAITING_PICK' },
+        });
+      }
+      const sent = await this.sendIdeasTemplate(settings.whatsappNumber!, org.name, batch.id);
       if (!sent) throw new Error('WhatsApp template could not be sent');
 
       return this.prisma.storyBatch.update({
@@ -552,7 +577,9 @@ export class StoriesService {
   /** True for inbound messages this service owns; checked before the generic inbox/AI path. */
   async isStoryReply(msg: any, phoneNumberId: string): Promise<boolean> {
     const id = replyId(msg);
-    if (id && [SHOW_PREFIX, CANCEL_PREFIX, ...OPTION_PREFIXES].some((p) => id.startsWith(p))) return true;
+    if (id && [SHOW_PREFIX, CANCEL_PREFIX, EDIT_CANCEL_PREFIX, ...OPTION_PREFIXES].some((p) => id.startsWith(p))) {
+      return true;
+    }
     const sender = this.sender();
     if (!sender || phoneNumberId !== sender.phoneNumberId) return false;
     const from = String(msg?.from || '');
@@ -574,17 +601,35 @@ export class StoriesService {
       });
       if (scheduled) return true;
     }
-    // Other free text is ours only while the merchant is describing an edit.
-    const editing = await this.prisma.storyBatch.findFirst({
+    // Other free text is ours only while the merchant is describing an edit
+    // (a lapsed edit is ours too, to say so instead of silently dropping it),
+    // or says "2 post karo" while today's ideas are open.
+    if (await this.editingBatch(from)) return true;
+    if (pickIntent(text) !== null) {
+      const open = await this.prisma.storyBatch.findFirst({
+        where: {
+          waRecipient: from,
+          status: { in: PICKABLE },
+          createdAt: { gt: new Date(Date.now() - PICK_WINDOW_MS) },
+        },
+        select: { id: true },
+      });
+      return Boolean(open);
+    }
+    return false;
+  }
+
+  /** The batch whose option this number is currently describing changes for. */
+  private editingBatch(from: string) {
+    return this.prisma.storyBatch.findFirst({
       where: {
         waRecipient: from,
         editingOptionId: { not: null },
         status: { in: PICKABLE },
         createdAt: { gt: new Date(Date.now() - PICK_WINDOW_MS) },
       },
-      select: { id: true },
+      orderBy: { updatedAt: 'desc' },
     });
-    return Boolean(editing);
   }
 
   async handleWhatsAppReply(msg: any): Promise<void> {
@@ -596,6 +641,9 @@ export class StoriesService {
     if (id?.startsWith(CANCEL_PREFIX)) {
       return this.cancelFromWhatsApp(id.slice(CANCEL_PREFIX.length), from);
     }
+    if (id?.startsWith(EDIT_CANCEL_PREFIX)) {
+      return this.cancelEdit(id.slice(EDIT_CANCEL_PREFIX.length), from);
+    }
     for (const prefix of OPTION_PREFIXES) {
       if (!id?.startsWith(prefix)) continue;
       const rest = id.slice(prefix.length);
@@ -603,6 +651,7 @@ export class StoriesService {
       const batchId = rest.slice(0, sep);
       const position = Number(rest.slice(sep + 1));
       if (prefix === EDIT_PREFIX) return this.startEdit(batchId, position, from);
+      if (prefix === CAPTION_PREFIX) return this.startEdit(batchId, position, from, 'CAPTION');
       const when = prefix === NOW_PREFIX ? 'now' : prefix === TOMORROW_PREFIX ? 'tomorrow' : undefined;
       return this.pick(batchId, position, from, new Date(), when);
     }
@@ -612,6 +661,28 @@ export class StoriesService {
     }
 
     const text = String(msg?.text?.body || '').trim();
+    // An open edit is the most recent thing the merchant started, so it wins:
+    // "cancel" then means "never mind the edit", not "cancel my schedule".
+    const editing = await this.editingBatch(from);
+    if (editing?.editingOptionId) {
+      const startedAt = editing.editingStartedAt || editing.updatedAt;
+      if (!startedAt || Date.now() - new Date(startedAt).getTime() > EDIT_TTL_MS) {
+        await this.clearEdit(editing.id);
+        await this.text(
+          from,
+          'Edit ka time nikal gaya tha, isliye kuch nahi badla. Badlav karna ho to option ke neeche "Edit" phir se dabaiye.',
+        );
+        return;
+      }
+      if (EDIT_CANCEL_TEXT.test(text)) return this.cancelEdit(editing.id, from);
+      const position = pickIntent(text);
+      if (position !== null) {
+        await this.clearEdit(editing.id);
+        return this.pick(editing.id, position, from);
+      }
+      return this.applyEdit(editing.id, editing.editingOptionId, text, from, editingMode(editing.editingMode));
+    }
+
     if (CANCEL_TEXT.test(text)) {
       const scheduled = await this.prisma.storyBatch.findFirst({
         where: { waRecipient: from, status: 'SCHEDULED' },
@@ -620,6 +691,8 @@ export class StoriesService {
       });
       if (scheduled) return this.cancelFromWhatsApp(scheduled.id, from);
     }
+    const position = pickIntent(text);
+    if (position === null) return;
     const batch = await this.prisma.storyBatch.findFirst({
       where: {
         waRecipient: from,
@@ -629,10 +702,7 @@ export class StoriesService {
       orderBy: { createdAt: 'desc' },
     });
     if (!batch) return;
-    if (batch.editingOptionId && !/^[1-5]$/.test(text)) {
-      return this.applyEdit(batch.id, batch.editingOptionId, text, from);
-    }
-    return this.pick(batch.id, Number(text), from);
+    return this.pick(batch.id, position, from);
   }
 
   async showOptions(batchId: string, from: string) {
@@ -764,8 +834,9 @@ export class StoriesService {
     await this.confirmScheduled(
       from,
       batch.id,
-      `Option ${position} chuna gaya. Yeh ${day} ${postTime} baje ${destinationsText(destinations)} pe post hoga.\n` +
-        'Badalna ho to kisi aur option pe "Post this" dabaiye, ya "Edit" se isme badlav kijiye.',
+      position,
+      option.id,
+      `Option ${position} chuna gaya. Yeh ${day} ${postTime} baje ${destinationsText(destinations)} pe post hoga.`,
     );
   }
 
@@ -793,20 +864,80 @@ export class StoriesService {
     }
   }
 
-  /** Confirms a scheduled post with a Cancel button, or tells them to type "cancel". */
-  private async confirmScheduled(to: string, batchId: string, body: string) {
+  /**
+   * Confirms a scheduled post with exactly what will go live: the caption and
+   * the hashtags, researched now rather than at posting time so the merchant
+   * is not approving blind. Buttons: Edit caption, Cancel.
+   */
+  private async confirmScheduled(to: string, batchId: string, position: number, optionId: string, headline: string) {
     const sender = this.sender();
     if (!sender) return;
+    const preview = await this.postPreview(optionId).catch((e) => {
+      this.logger.warn(`Preview for option ${optionId} failed: ${e.message}`);
+      return '';
+    });
+    const body = [headline, preview].filter(Boolean).join('\n\n');
     const sent = await this.metaPublisher.sendInteractiveButtonMessage(
       sender.phoneNumberId,
       to,
       'Post scheduled',
       body,
       'Reel2Real daily posts',
-      [{ id: `${CANCEL_PREFIX}${batchId}`, title: 'Cancel' }],
+      [
+        { id: `${CAPTION_PREFIX}${batchId}_${position}`, title: 'Edit caption' },
+        { id: `${CANCEL_PREFIX}${batchId}`, title: 'Cancel' },
+      ],
       sender.accessToken,
     );
-    if (!sent) await this.text(to, `${body}\nRokna ho to "cancel" likhiye.`);
+    if (!sent) {
+      await this.text(
+        to,
+        `${body}\n\nCaption badalna ho to "caption: naya caption" likhiye. Rokna ho to "cancel" likhiye.`,
+      );
+    }
+  }
+
+  /** "Caption + hashtags" exactly as they will be posted. */
+  private async postPreview(optionId: string): Promise<string> {
+    const option = await this.prisma.storyOption.findUnique({
+      where: { id: optionId },
+      select: {
+        id: true,
+        title: true,
+        caption: true,
+        seedKeyword: true,
+        hashtags: true,
+        keywords: true,
+        batch: { select: { orgId: true, trendKeywords: true } },
+      },
+    });
+    if (!option) return '';
+    const { hashtags } = await this.ensureHashtags(option);
+    let caption = option.caption || option.title;
+    if (caption.length > PREVIEW_CAPTION_CHARS) caption = `${caption.slice(0, PREVIEW_CAPTION_CHARS)}…`;
+    return ['*Preview (yahi post hoga):*', caption, hashtags.join(' ')].filter(Boolean).join('\n');
+  }
+
+  /**
+   * Hashtags and keywords for an option, researched once and stored, so the
+   * preview the merchant approved is what gets posted.
+   */
+  private async ensureHashtags(option: {
+    id: string;
+    seedKeyword: string;
+    hashtags?: string[] | null;
+    keywords?: string[] | null;
+    batch?: { orgId?: string; trendKeywords?: string[] | null } | null;
+  }): Promise<{ keywords: string[]; hashtags: string[] }> {
+    if (option.hashtags?.length) return { keywords: option.keywords || [], hashtags: option.hashtags };
+    const settings = option.batch?.orgId
+      ? await this.prisma.storySettings.findUnique({ where: { orgId: option.batch.orgId } })
+      : null;
+    const research = await this.keywords.research(option.seedKeyword, settings?.keywordDatabase || 'in');
+    const keywords = unique([...research.keywords, ...(option.batch?.trendKeywords || [])]).slice(0, 5);
+    const hashtags = research.hashtags;
+    await this.prisma.storyOption.update({ where: { id: option.id }, data: { keywords, hashtags } });
+    return { keywords, hashtags };
   }
 
   /**
@@ -818,8 +949,8 @@ export class StoriesService {
       where: { id: batchId, status: { in: PICKABLE } },
       data:
         at === 'now'
-          ? { selectedOptionId: optionId, scheduledFor: now, editingOptionId: null }
-          : { status: 'SCHEDULED', selectedOptionId: optionId, scheduledFor: at, editingOptionId: null },
+          ? { selectedOptionId: optionId, scheduledFor: now, ...NO_EDIT }
+          : { status: 'SCHEDULED', selectedOptionId: optionId, scheduledFor: at, ...NO_EDIT },
     });
     return claimed.count > 0;
   }
@@ -864,7 +995,7 @@ export class StoriesService {
     );
   }
 
-  async startEdit(batchId: string, position: number, from: string) {
+  async startEdit(batchId: string, position: number, from: string, mode: EditMode = 'IMAGE') {
     const batch = await this.prisma.storyBatch.findUnique({
       where: { id: batchId },
       include: { options: { where: { position }, select: { id: true } } },
@@ -878,25 +1009,65 @@ export class StoriesService {
     if (!option) return;
     await this.prisma.storyBatch.update({
       where: { id: batch.id },
-      data: { editingOptionId: option.id },
+      data: { editingOptionId: option.id, editingMode: mode, editingStartedAt: new Date() },
     });
+    const body =
+      mode === 'CAPTION'
+        ? `Option ${position} ka naya caption likh kar bhejiye. Hashtags hum khud jod denge.`
+        : `Option ${position} me kya badalna hai? Likh kar bhejiye, jaise:\n` +
+          '"background golden karo", "dulhan ki lehenga red karo", "flowers hatao".\n' +
+          'Sirf caption badalna ho to aise likhiye: "caption: Aaj book karo, 20% off!"';
+    await this.promptWithCancel(from, batch.id, body);
+  }
+
+  /** The edit prompt, with an "Edit cancel" button; typing "rehne do" works too. */
+  private async promptWithCancel(to: string, batchId: string, body: string) {
+    const sender = this.sender();
+    if (!sender) return;
+    const sent = await this.metaPublisher.sendInteractiveButtonMessage(
+      sender.phoneNumberId,
+      to,
+      'Edit',
+      body,
+      'Man badal gaya? "rehne do" likhiye',
+      [{ id: `${EDIT_CANCEL_PREFIX}${batchId}`, title: 'Edit cancel' }],
+      sender.accessToken,
+    );
+    if (!sent) await this.text(to, `${body}\n\nMan badal gaya to "rehne do" likhiye.`);
+  }
+
+  private clearEdit(batchId: string) {
+    return this.prisma.storyBatch.updateMany({
+      where: { id: batchId, editingOptionId: { not: null } },
+      data: NO_EDIT,
+    });
+  }
+
+  /** "Edit cancel" / "rehne do": leaves the option exactly as it was. */
+  async cancelEdit(batchId: string, from: string) {
+    const batch = await this.prisma.storyBatch.findUnique({
+      where: { id: batchId },
+      select: { waRecipient: true },
+    });
+    if (!batch || batch.waRecipient !== from) return;
+    const cleared = await this.clearEdit(batchId);
     await this.text(
       from,
-      `Option ${position} me kya badalna hai? Likh kar bhejiye, jaise:\n` +
-        '"background golden karo", "dulhan ki lehenga red karo", "flowers hatao".\n' +
-        'Sirf caption badalna ho to aise likhiye: "caption: Aaj book karo, 20% off!"',
+      cleared.count
+        ? 'Theek hai, edit cancel. Post jaisi thi waisi hi hai.'
+        : 'Koi edit chal nahi raha tha, post jaisi thi waisi hi hai.',
     );
   }
 
-  async applyEdit(batchId: string, optionId: string, instruction: string, from: string) {
+  async applyEdit(batchId: string, optionId: string, instruction: string, from: string, mode: EditMode = 'IMAGE') {
     // Clear the flag first so a retried webhook does not run the edit twice.
     const claimed = await this.prisma.storyBatch.updateMany({
       where: { id: batchId, editingOptionId: optionId },
-      data: { editingOptionId: null },
+      data: NO_EDIT,
     });
     if (claimed.count === 0) return;
 
-    if (CAPTION_EDIT.test(instruction)) {
+    if (mode === 'CAPTION' || CAPTION_EDIT.test(instruction)) {
       const caption = instruction.replace(CAPTION_EDIT, '').trim().slice(0, 1000);
       if (!caption) {
         await this.text(from, 'Caption khaali hai. "Edit" dabakar "caption: naya caption" likhiye.');
@@ -906,8 +1077,17 @@ export class StoriesService {
         where: { id: optionId },
         data: { caption },
       });
-      await this.text(from, 'Caption badal diya.');
-      await this.sendOption(batchId, updated, from);
+      const batch = await this.prisma.storyBatch.findUnique({
+        where: { id: batchId },
+        select: { status: true, selectedOptionId: true },
+      });
+      if (batch?.status === 'SCHEDULED' && batch.selectedOptionId === optionId) {
+        // Already scheduled: show the new preview; the schedule stays.
+        await this.confirmScheduled(from, batchId, updated.position, optionId, 'Caption badal diya. Schedule wahi hai.');
+      } else {
+        await this.text(from, 'Caption badal diya.');
+        await this.sendOption(batchId, updated, from);
+      }
       return;
     }
 
@@ -1118,7 +1298,24 @@ export class StoriesService {
       setImmediate(() => void this.publishBatch(batch.id).catch(() => undefined));
       return { status: 'PUBLISHING', scheduledFor: now };
     }
-    return { status: 'SCHEDULED', scheduledFor: at };
+    // Same preview as on WhatsApp: the hashtags that will go live, shown on the card.
+    let hashtags: string[] = [];
+    try {
+      const full = await this.prisma.storyOption.findUnique({
+        where: { id: option.id },
+        select: {
+          id: true,
+          seedKeyword: true,
+          hashtags: true,
+          keywords: true,
+          batch: { select: { orgId: true, trendKeywords: true } },
+        },
+      });
+      if (full) hashtags = (await this.ensureHashtags(full)).hashtags;
+    } catch (e: any) {
+      this.logger.warn(`Hashtag research for option ${option.id} failed: ${e.message}`);
+    }
+    return { status: 'SCHEDULED', scheduledFor: at, hashtags };
   }
 
   async cancelFromDashboard(orgId: string, batchId: string) {
@@ -1256,7 +1453,7 @@ export class StoriesService {
   async publishOption(orgId: string, optionId: string) {
     const option = await this.prisma.storyOption.findUnique({
       where: { id: optionId },
-      include: { batch: { select: { trendKeywords: true } } },
+      include: { batch: { select: { orgId: true, trendKeywords: true } } },
     });
     if (!option?.imageData) throw new Error('Post image is missing');
     const settings = await this.prisma.storySettings.findUnique({
@@ -1264,13 +1461,12 @@ export class StoriesService {
     });
     const destinations = destinationsOf(settings);
 
-    const research = await this.keywords.research(option.seedKeyword, settings?.keywordDatabase || 'in');
-    const keywords = unique([...research.keywords, ...(option.batch?.trendKeywords || [])]).slice(0, 5);
-    const hashtags = research.hashtags;
+    // The hashtags shown in the WhatsApp preview, when the merchant saw one.
+    const { keywords, hashtags } = await this.ensureHashtags(option);
     const draft = Buffer.from(option.imageData);
 
     let finalImage: Buffer | null = null;
-    if (destinations.includes('IG_STORY')) {
+    if (destinations.includes('IG_STORY') || destinations.includes('IG_REEL')) {
       if (option.source === 'OWN') {
         // The seller's own photo goes out as they sent it.
         finalImage = draft;
@@ -1283,12 +1479,25 @@ export class StoriesService {
         }
       }
     }
+    // The Reel is the lettered story image with a slow zoom. Made before any
+    // publishing so a failure only costs the Reel, not the other destinations.
+    let reelError: string | null = null;
+    let reel: Buffer | null = null;
+    if (destinations.includes('IG_REEL')) {
+      try {
+        reel = await toReelMp4(finalImage || draft);
+      } catch (e: any) {
+        reelError = e.message;
+        this.logger.warn(`Reel video for option ${option.id} failed: ${e.message}`);
+      }
+    }
     await this.prisma.storyOption.update({
       where: { id: option.id },
       data: {
         keywords,
         hashtags,
         ...(finalImage ? { finalImageData: new Uint8Array(finalImage) } : {}),
+        ...(reel ? { reelVideoData: new Uint8Array(reel) } : {}),
       },
     });
 
@@ -1316,16 +1525,27 @@ export class StoriesService {
           };
           continue;
         }
+        if (d === 'IG_REEL' && !reel) {
+          targets[d] = { ok: false, error: reelError || 'Reel video could not be made' };
+          continue;
+        }
         const token = this.crypto.decrypt(ig.accessTokenEncrypted);
         await attempt(d, ig.id, () =>
           d === 'IG_STORY'
             ? this.metaPublisher.publishInstagramStory(ig.channelIdentifier, this.mediaUrl(option.id, 'final'), token)
-            : this.metaPublisher.publishInstagramFeed(
-                ig.channelIdentifier,
-                this.mediaUrl(option.id, 'feed'),
-                caption,
-                token,
-              ),
+            : d === 'IG_REEL'
+              ? this.metaPublisher.publishInstagramReel(
+                  ig.channelIdentifier,
+                  this.mediaUrl(option.id, 'reel', option.revision),
+                  caption,
+                  token,
+                )
+              : this.metaPublisher.publishInstagramFeed(
+                  ig.channelIdentifier,
+                  this.mediaUrl(option.id, 'feed'),
+                  caption,
+                  token,
+                ),
         );
       }
     }
@@ -1405,14 +1625,23 @@ export class StoriesService {
       /\/$/,
       '',
     );
-    const url = `${base}/api/stories/media/${optionId}/${variant}/${this.sign(optionId, variant)}.jpg`;
+    const ext = variant === 'reel' ? 'mp4' : 'jpg';
+    const url = `${base}/api/stories/media/${optionId}/${variant}/${this.sign(optionId, variant)}.${ext}`;
     return revision ? `${url}?v=${revision}` : url;
   }
 
   async getMedia(optionId: string, variant: string, signature: string): Promise<Buffer> {
-    if (variant !== 'draft' && variant !== 'final' && variant !== 'feed') throw new NotFoundException();
-    if (!timingSafeEqualString(signature.replace(/\.jpg$/, ''), this.sign(optionId, variant))) {
+    if (!['draft', 'final', 'feed', 'reel'].includes(variant)) throw new NotFoundException();
+    if (!timingSafeEqualString(signature.replace(/\.(jpg|mp4)$/, ''), this.sign(optionId, variant))) {
       throw new NotFoundException();
+    }
+    if (variant === 'reel') {
+      const reel = await this.prisma.storyOption.findUnique({
+        where: { id: optionId },
+        select: { reelVideoData: true },
+      });
+      if (!reel?.reelVideoData) throw new NotFoundException();
+      return Buffer.from(reel.reelVideoData);
     }
     const option = await this.prisma.storyOption.findUnique({
       where: { id: optionId },
@@ -1436,10 +1665,8 @@ export class StoriesService {
   // ---------------------------------------------------------------- helpers
 
   /** The Reel2Real WhatsApp number that messages merchants. */
-  private sender(): Sender | null {
-    const phoneNumberId = process.env.STORY_WA_PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
-    const accessToken = process.env.STORY_WA_ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
-    return phoneNumberId && accessToken ? { phoneNumberId, accessToken } : null;
+  private sender(): WaSender | null {
+    return reel2realSender();
   }
 
   private instagramChannel(orgId: string, preferredId?: string | null) {
@@ -1493,6 +1720,34 @@ const OPTION_FIELDS = {
   source: true,
   offeringId: true,
 } as const;
+
+// Everything that marks a batch as "in edit mode".
+const NO_EDIT = { editingOptionId: null, editingMode: null, editingStartedAt: null };
+
+const PICK_VERB = String.raw`(?:post|pick|select|chuno|choose|lagao|laga\s*do|daalo|dalo|daal\s*do|final)`;
+const PICK_TEXT = [
+  // "2", "option 2", "2 post karo", "no. 3 wala post kar do", "2 please"
+  new RegExp(
+    String.raw`^(?:option|opt|no\.?|number|#)?\s*([1-5])\s*(?:wala|wali|waala|waali|vala|vali)?\s*${PICK_VERB}?\s*(?:karo|kar\s*do|kardo|kijiye|please|pls)?[.!\s]*$`,
+    'i',
+  ),
+  // "post 2", "post option 3", "chuno 1"
+  new RegExp(String.raw`^${PICK_VERB}\s*(?:option|opt|no\.?|number|#)?\s*([1-5])[.!\s]*$`, 'i'),
+];
+
+/** The option number in "2", "option 2 post karo", "post 3"; null for anything else. */
+export function pickIntent(text: string): number | null {
+  const t = String(text || '').trim();
+  for (const re of PICK_TEXT) {
+    const m = re.exec(t);
+    if (m) return Number(m[1]);
+  }
+  return null;
+}
+
+function editingMode(value: string | null | undefined): EditMode {
+  return value === 'CAPTION' ? 'CAPTION' : 'IMAGE';
+}
 
 function replyId(msg: any): string | undefined {
   return msg?.button?.payload || msg?.interactive?.list_reply?.id || msg?.interactive?.button_reply?.id;

@@ -47,7 +47,7 @@ export class StoriesController {
     return { accepted: true };
   }
 
-  /** Public, signed image URLs that WhatsApp and Instagram fetch. */
+  /** Public, signed image (and Reel video) URLs that WhatsApp and Instagram fetch. */
   @Get('media/:optionId/:variant/:signature')
   async media(
     @Param('optionId') optionId: string,
@@ -56,7 +56,7 @@ export class StoriesController {
     @Res() res: Response,
   ) {
     const image = await this.stories.getMedia(optionId, variant, signature);
-    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Content-Type', variant === 'reel' ? 'video/mp4' : 'image/jpeg');
     res.setHeader('Cache-Control', 'public, max-age=86400');
     res.send(image);
   }
@@ -158,20 +158,24 @@ export class StoriesController {
   }
 
   /**
-   * Generates today's ideas right away (replacing today's batch) so a merchant
-   * can try it. Refused when today's pick is scheduled or already posted.
+   * Generates today's ideas right away (replacing today's batch). `via: "web"`
+   * only makes them for picking in the dashboard; otherwise they also go to
+   * WhatsApp when a number is set. Refused when today's pick is scheduled or
+   * already posted.
    */
   @Post('run-now')
   @HttpCode(202)
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('OWNER', 'ADMIN')
-  async runNow(@CurrentUser() user: JwtPayload) {
+  async runNow(@CurrentUser() user: JwtPayload, @Body() body: { via?: 'whatsapp' | 'web' } = {}) {
     await this.stories.assertCanRegenerate(user.orgId);
+    const settings = await this.stories.getSettings(user.orgId);
+    const via = body?.via === 'web' || !settings.whatsappNumber ? 'web' : 'whatsapp';
     setImmediate(() => {
       this.stories
-        .generateBatch(user.orgId, { force: true })
+        .generateBatch(user.orgId, { force: true, via })
         .catch((e) => this.logger.error(`Run-now failed for org ${user.orgId}: ${e.message}`));
     });
-    return { accepted: true };
+    return { accepted: true, via };
   }
 }

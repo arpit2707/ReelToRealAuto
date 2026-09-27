@@ -480,8 +480,9 @@ describe('PostTaggingService', () => {
     const posts: any = { getPost: jest.fn().mockResolvedValue(post) };
     const gemini: any = { isConfigured: () => false };
     const context: any = { search: jest.fn().mockResolvedValue([]) };
+    const meta: any = { sendWhatsAppImageButtons: jest.fn(), sendInteractiveButtonMessage: jest.fn() };
     const { PostTaggingService } = jest.requireActual('./post-tagging.service');
-    const service = new PostTaggingService(prisma, posts, gemini, context);
+    const service = new PostTaggingService(prisma, posts, gemini, context, meta);
     return { service, prisma, posts };
   }
 

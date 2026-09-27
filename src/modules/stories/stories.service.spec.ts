@@ -7,6 +7,7 @@ import {
   normalizeTime,
   normalizeWhatsAppNumber,
   parseScheduleTime,
+  pickIntent,
   StoriesService,
   zonedDateTime,
 } from './stories.service';
@@ -17,6 +18,12 @@ jest.mock('./story-image', () => ({
   toPaddedStoryJpeg: jest.fn(async (b: Buffer) => Buffer.concat([Buffer.from('padded:'), b])),
   overlayText: jest.fn(async () => Buffer.from('overlay')),
 }));
+
+jest.mock('./story-video', () => ({
+  toReelMp4: jest.fn(async (b: Buffer) => Buffer.concat([Buffer.from('mp4:'), b])),
+}));
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const storyVideo = require('./story-video');
 
 const MERCHANT = '919876543210';
 // 2026-09-28 10:00 IST: after the 09:00 send time, before the 19:00 post time.
@@ -364,6 +371,8 @@ describe('StoriesService', () => {
           selectedOptionId: 'o2',
           scheduledFor: new Date('2026-09-28T13:30:00Z'),
           editingOptionId: null,
+          editingMode: null,
+          editingStartedAt: null,
         },
       });
       expect(meta.publishInstagramStory).not.toHaveBeenCalled();
@@ -418,7 +427,10 @@ describe('StoriesService', () => {
       meta.sendInteractiveButtonMessage.mockResolvedValue(true);
 
       await service.pick('b1', 2, MERCHANT, MORNING);
-      expect(meta.sendInteractiveButtonMessage.mock.calls[0][5]).toEqual([{ id: 'STORY_CANCEL_b1', title: 'Cancel' }]);
+      expect(meta.sendInteractiveButtonMessage.mock.calls[0][5]).toEqual([
+        { id: 'STORY_CAP_b1_2', title: 'Edit caption' },
+        { id: 'STORY_CANCEL_b1', title: 'Cancel' },
+      ]);
 
       prisma.storyBatch.findUnique.mockResolvedValue({ waRecipient: MERCHANT, status: 'SCHEDULED' });
       prisma.storyBatch.updateMany.mockClear();
@@ -466,13 +478,15 @@ describe('StoriesService', () => {
       });
       expect(prisma.storyBatch.update).toHaveBeenCalledWith({
         where: { id: 'b1' },
-        data: { editingOptionId: 'o2' },
+        data: { editingOptionId: 'o2', editingMode: 'IMAGE', editingStartedAt: expect.any(Date) },
       });
       expect(meta.sendWhatsAppMessage.mock.calls[0][2]).toContain('kya badalna hai');
 
       prisma.storyBatch.findFirst.mockResolvedValue({
         id: 'b1',
         editingOptionId: 'o2',
+        editingMode: 'IMAGE',
+        editingStartedAt: new Date(),
       });
       prisma.storyOption.findUnique.mockResolvedValue({
         id: 'o2',
@@ -485,7 +499,7 @@ describe('StoriesService', () => {
 
       expect(prisma.storyBatch.updateMany).toHaveBeenCalledWith({
         where: { id: 'b1', editingOptionId: 'o2' },
-        data: { editingOptionId: null },
+        data: { editingOptionId: null, editingMode: null, editingStartedAt: null },
       });
       expect(gemini.editImage).toHaveBeenCalledWith(expect.any(Buffer), 'image/jpeg', 'background golden karo');
       expect(prisma.storyOption.update.mock.calls[0][0].data).toMatchObject({
@@ -846,7 +860,8 @@ describe('StoriesService (scheduling and own posts)', () => {
       });
       await service.publishOption('org1', 'own1');
       expect(gemini.addTextToImage).not.toHaveBeenCalled();
-      expect(Buffer.from(prisma.storyOption.update.mock.calls[0][0].data.finalImageData).toString()).toBe('padded');
+      const imageWrite = prisma.storyOption.update.mock.calls.find(([a]: any) => a.data.finalImageData)[0];
+      expect(Buffer.from(imageWrite.data.finalImageData).toString()).toBe('padded');
     });
   });
 
@@ -889,12 +904,12 @@ describe('StoriesService (scheduling and own posts)', () => {
     it('schedules for the posting time, or says the time has passed', async () => {
       const { service, prisma } = makeService();
       prisma.storyBatch.findFirst.mockResolvedValue(dashBatch());
-      await expect(service.pickFromDashboard('org1', 'b1', 2, {}, MORNING)).resolves.toEqual({
+      await expect(service.pickFromDashboard('org1', 'b1', 2, {}, MORNING)).resolves.toMatchObject({
         status: 'SCHEDULED',
         scheduledFor: new Date('2026-09-28T13:30:00Z'),
       });
       await expect(service.pickFromDashboard('org1', 'b1', 2, {}, NIGHT)).rejects.toBeInstanceOf(BadRequestException);
-      await expect(service.pickFromDashboard('org1', 'b1', 2, { when: 'tomorrow' }, NIGHT)).resolves.toEqual({
+      await expect(service.pickFromDashboard('org1', 'b1', 2, { when: 'tomorrow' }, NIGHT)).resolves.toMatchObject({
         status: 'SCHEDULED',
         scheduledFor: new Date('2026-09-29T13:30:00Z'),
       });
@@ -981,5 +996,287 @@ describe('time helpers', () => {
     expect(normalizeTime('21.30')).toBe('21:30');
     expect(normalizeTime('24:00')).toBeNull();
     expect(normalizeTime('noon')).toBeNull();
+  });
+});
+
+describe('content autopilot', () => {
+  beforeEach(() => {
+    process.env.STORY_WA_PHONE_NUMBER_ID = 'platform-phone';
+    process.env.STORY_WA_ACCESS_TOKEN = 'platform-token';
+    process.env.STORY_MEDIA_SECRET = 'media-secret';
+    process.env.PUBLIC_BASE_URL = 'https://reel2realbooking.in';
+  });
+  afterEach(() => {
+    for (const k of ['STORY_WA_PHONE_NUMBER_ID', 'STORY_WA_ACCESS_TOKEN', 'STORY_MEDIA_SECRET', 'PUBLIC_BASE_URL']) {
+      delete process.env[k];
+    }
+  });
+
+  const editing = (over: any = {}) => ({
+    id: 'b1',
+    orgId: 'org1',
+    status: 'AWAITING_PICK',
+    waRecipient: MERCHANT,
+    editingOptionId: 'o2',
+    editingMode: 'IMAGE',
+    editingStartedAt: new Date(),
+    ...over,
+  });
+  const say = (body: string) => ({ from: MERCHANT, text: { body } });
+  const lastText = (meta: any) => meta.sendWhatsAppMessage.mock.calls.at(-1)?.[2] as string;
+
+  describe('pickIntent', () => {
+    it.each([
+      ['2', 2],
+      ['option 3', 3],
+      ['Option 2 post karo', 2],
+      ['2 post karo', 2],
+      ['no. 4 wala post kar do', 4],
+      ['post 5', 5],
+      ['chuno 1', 1],
+      ['3 please', 3],
+    ])('reads "%s" as option %d', (text, n) => expect(pickIntent(text)).toBe(n));
+
+    it.each(['6', 'background golden karo', '2 din ka offer', 'rehne do', 'caption: 20% off', ''])(
+      'does not read "%s" as a pick',
+      (text) => expect(pickIntent(text)).toBeNull(),
+    );
+  });
+
+  describe('scheduled-post preview', () => {
+    it('shows the exact caption and hashtags, with Edit caption and Cancel', async () => {
+      const { service, prisma, meta, keywords } = makeService();
+      meta.sendInteractiveButtonMessage.mockResolvedValue(true);
+      prisma.storyBatch.findUnique.mockResolvedValue(openBatch());
+      prisma.storyOption.findUnique.mockResolvedValue({
+        id: 'o2',
+        title: 'Bridal glow',
+        caption: 'Book your bridal trial today.',
+        seedKeyword: 'hd bridal makeup',
+        hashtags: [],
+        keywords: [],
+        batch: { orgId: 'org1', trendKeywords: ['wedding season looks'] },
+      });
+
+      await service.pick('b1', 2, MERCHANT, MORNING);
+
+      const [, to, header, body, , buttons] = meta.sendInteractiveButtonMessage.mock.calls[0];
+      expect([to, header]).toEqual([MERCHANT, 'Post scheduled']);
+      expect(body).toContain('19:00 baje Instagram story');
+      expect(body).toContain('Book your bridal trial today.');
+      expect(body).toContain('#bridalmakeup #hdmakeup');
+      expect(buttons.map((b: any) => b.title)).toEqual(['Edit caption', 'Cancel']);
+      // Researched once and stored, so the publish uses exactly these.
+      expect(keywords.research).toHaveBeenCalledTimes(1);
+      expect(prisma.storyOption.update).toHaveBeenCalledWith({
+        where: { id: 'o2' },
+        data: { keywords: ['bridal makeup', 'wedding season looks'], hashtags: ['#bridalmakeup', '#hdmakeup'] },
+      });
+    });
+
+    it('publishes the hashtags the merchant approved without researching again', async () => {
+      const { service, prisma, meta, keywords } = makeService({ destinations: ['IG_FEED'] });
+      prisma.storyOption.findUnique.mockResolvedValue({
+        id: 'o2',
+        title: 'Bridal glow',
+        caption: 'Book now',
+        seedKeyword: 'hd bridal makeup',
+        source: 'AI',
+        hashtags: ['#approved'],
+        keywords: ['k'],
+        imageData: Buffer.from('draft'),
+        batch: { orgId: 'org1', trendKeywords: [] },
+      });
+      await service.publishOption('org1', 'o2');
+      expect(keywords.research).not.toHaveBeenCalled();
+      expect(meta.publishInstagramFeed.mock.calls[0][2]).toBe('Book now\n\n#approved');
+    });
+
+    it('"Edit caption" takes the next message as the caption and re-shows the preview', async () => {
+      const { service, prisma, meta, gemini } = makeService();
+      prisma.storyBatch.findUnique.mockResolvedValue(openBatch({ status: 'SCHEDULED' }));
+      await service.handleWhatsAppReply({ from: MERCHANT, interactive: { button_reply: { id: 'STORY_CAP_b1_2' } } });
+      expect(prisma.storyBatch.update.mock.calls[0][0].data).toMatchObject({ editingOptionId: 'o2', editingMode: 'CAPTION' });
+      expect(lastText(meta)).toContain('naya caption');
+
+      prisma.storyBatch.findFirst.mockResolvedValue(editing({ status: 'SCHEDULED', editingMode: 'CAPTION' }));
+      prisma.storyBatch.findUnique.mockResolvedValue({ status: 'SCHEDULED', selectedOptionId: 'o2' });
+      prisma.storyOption.findUnique.mockResolvedValue({
+        id: 'o2',
+        title: 'T2',
+        caption: 'Shaadi season special, 20% off!',
+        seedKeyword: 's',
+        hashtags: ['#bridal'],
+        batch: { orgId: 'org1' },
+      });
+      await service.handleWhatsAppReply(say('Shaadi season special, 20% off!'));
+
+      expect(gemini.editImage).not.toHaveBeenCalled();
+      expect(prisma.storyOption.update).toHaveBeenCalledWith({
+        where: { id: 'o2' },
+        data: { caption: 'Shaadi season special, 20% off!' },
+      });
+      expect(lastText(meta)).toContain('Caption badal diya. Schedule wahi hai.');
+      expect(lastText(meta)).toContain('#bridal');
+    });
+  });
+
+  describe('edit mode', () => {
+    it.each(['rehne do', 'Cancel', 'chhodo', 'nahi'])('"%s" cancels the edit instead of editing the image', async (word) => {
+      const { service, prisma, meta, gemini } = makeService();
+      prisma.storyBatch.findFirst.mockResolvedValue(editing());
+      prisma.storyBatch.findUnique.mockResolvedValue({ waRecipient: MERCHANT });
+      await service.handleWhatsAppReply(say(word));
+      expect(gemini.editImage).not.toHaveBeenCalled();
+      expect(prisma.storyBatch.updateMany).toHaveBeenCalledWith({
+        where: { id: 'b1', editingOptionId: { not: null } },
+        data: { editingOptionId: null, editingMode: null, editingStartedAt: null },
+      });
+      expect(lastText(meta)).toContain('edit cancel');
+    });
+
+    it('the "Edit cancel" button does the same', async () => {
+      const { service, prisma, meta } = makeService();
+      prisma.storyBatch.findUnique.mockResolvedValue({ waRecipient: MERCHANT });
+      await service.handleWhatsAppReply({ from: MERCHANT, interactive: { button_reply: { id: 'STORY_EDITX_b1' } } });
+      expect(lastText(meta)).toContain('edit cancel');
+    });
+
+    it('offers an "Edit cancel" button with the edit prompt', async () => {
+      const { service, prisma, meta } = makeService();
+      meta.sendInteractiveButtonMessage.mockResolvedValue(true);
+      prisma.storyBatch.findUnique.mockResolvedValue(openBatch());
+      await service.startEdit('b1', 2, MERCHANT);
+      const [, , , body, , buttons] = meta.sendInteractiveButtonMessage.mock.calls[0];
+      expect(body).toContain('kya badalna hai');
+      expect(buttons).toEqual([{ id: 'STORY_EDITX_b1', title: 'Edit cancel' }]);
+    });
+
+    it('"cancel" during an edit of a scheduled post cancels the edit, not the schedule', async () => {
+      const { service, prisma } = makeService();
+      prisma.storyBatch.findFirst.mockResolvedValue(editing({ status: 'SCHEDULED' }));
+      prisma.storyBatch.findUnique.mockResolvedValue({ waRecipient: MERCHANT });
+      await service.handleWhatsAppReply(say('cancel'));
+      const unscheduled = prisma.storyBatch.updateMany.mock.calls.some(
+        ([a]: any) => a.where.status === 'SCHEDULED',
+      );
+      expect(unscheduled).toBe(false);
+    });
+
+    it('"option 3 post karo" during an edit picks option 3', async () => {
+      const { service, prisma, gemini } = makeService();
+      prisma.storyBatch.findFirst.mockResolvedValue(editing());
+      prisma.storyBatch.findUnique.mockResolvedValue(openBatch({ options: [{ id: 'o3' }] }));
+      await service.handleWhatsAppReply(say('option 3 post karo'));
+      expect(gemini.editImage).not.toHaveBeenCalled();
+      expect(prisma.storyBatch.findUnique.mock.calls.at(-1)[0].include.options.where).toEqual({ position: 3 });
+      expect(prisma.storyBatch.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: 'SCHEDULED', selectedOptionId: 'o3' }) }),
+      );
+    });
+
+    it('a message long after Edit is not taken as an edit', async () => {
+      const { service, prisma, meta, gemini } = makeService();
+      prisma.storyBatch.findFirst.mockResolvedValue(editing({ editingStartedAt: new Date(Date.now() - 31 * 60 * 1000) }));
+      await service.handleWhatsAppReply(say('background golden karo'));
+      expect(gemini.editImage).not.toHaveBeenCalled();
+      expect(lastText(meta)).toContain('Edit ka time nikal gaya');
+    });
+
+    it('owns "2 post karo" only while ideas are open, and never a bare "nahi"', async () => {
+      const { service, prisma } = makeService();
+      prisma.storyBatch.findFirst.mockResolvedValue(null);
+      expect(await service.isStoryReply(say('nahi'), 'platform-phone')).toBe(false);
+      expect(await service.isStoryReply(say('2 post karo'), 'platform-phone')).toBe(false);
+      prisma.storyBatch.findFirst.mockImplementation(async ({ where }: any) =>
+        where.editingOptionId ? null : { id: 'b1' },
+      );
+      expect(await service.isStoryReply(say('2 post karo'), 'platform-phone')).toBe(true);
+    });
+  });
+
+  describe('ideas on the web', () => {
+    it('makes ideas without WhatsApp and leaves them to pick in the dashboard', async () => {
+      delete process.env.STORY_WA_PHONE_NUMBER_ID;
+      delete process.env.STORY_WA_ACCESS_TOKEN;
+      const { service, prisma, meta } = makeService({ whatsappNumber: null });
+      const batch = await service.generateBatch('org1', { via: 'web' });
+      expect(prisma.storyBatch.create.mock.calls[0][0].data.waRecipient).toBeNull();
+      expect(prisma.storyOption.create).toHaveBeenCalledTimes(5);
+      expect(batch.status).toBe('AWAITING_PICK');
+      expect(meta.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    });
+
+    it('works for an org that never saved daily-post settings', async () => {
+      const { service, prisma } = makeService();
+      prisma.storySettings.findUnique.mockResolvedValue(null);
+      await service.generateBatch('org1', { via: 'web' });
+      expect(prisma.storyOption.create).toHaveBeenCalledTimes(5);
+    });
+
+    it('the daily WhatsApp run still needs a number', async () => {
+      const { service } = makeService({ whatsappNumber: null });
+      await expect(service.generateBatch('org1')).rejects.toThrow('No WhatsApp number');
+    });
+  });
+
+  describe('Instagram reel', () => {
+    const reelOption = {
+      id: 'o2',
+      title: 'Bridal glow',
+      caption: 'Book now',
+      seedKeyword: 'hd bridal makeup',
+      source: 'AI',
+      revision: 0,
+      imageData: Buffer.from('draft'),
+      batch: { orgId: 'org1', trendKeywords: [] },
+    };
+
+    it('makes a video from the lettered image and publishes it as a Reel', async () => {
+      const { service, prisma, meta } = makeService({ destinations: ['IG_REEL'] });
+      meta.publishInstagramReel = jest.fn().mockResolvedValue('reel99');
+      prisma.storyOption.findUnique.mockResolvedValue(reelOption);
+
+      const result = await service.publishOption('org1', 'o2');
+
+      expect(storyVideo.toReelMp4).toHaveBeenCalledWith(Buffer.from('jpg:lettered'));
+      const saved = prisma.storyOption.update.mock.calls.find(([a]: any) => a.data.reelVideoData)[0];
+      expect(Buffer.from(saved.data.reelVideoData).toString()).toBe('mp4:jpg:lettered');
+      const [igUser, url, caption] = meta.publishInstagramReel.mock.calls[0];
+      expect(igUser).toBe('ig123');
+      expect(url).toMatch(/\/media\/o2\/reel\/[\w-]+\.mp4$/);
+      expect(caption).toBe('Book now\n\n#bridalmakeup #hdmakeup');
+      expect(result.targets.IG_REEL).toEqual({ ok: true, id: 'reel99' });
+    });
+
+    it('a failed video only fails the Reel; the other destinations still post', async () => {
+      const { service, prisma, meta } = makeService({ destinations: ['IG_REEL', 'IG_FEED'] });
+      meta.publishInstagramReel = jest.fn();
+      storyVideo.toReelMp4.mockRejectedValueOnce(new Error('ffmpeg is not available on this server'));
+      prisma.storyOption.findUnique.mockResolvedValue(reelOption);
+
+      const result = await service.publishOption('org1', 'o2');
+
+      expect(meta.publishInstagramReel).not.toHaveBeenCalled();
+      expect(result.targets.IG_REEL).toEqual({ ok: false, error: 'ffmpeg is not available on this server' });
+      expect(result.targets.IG_FEED).toEqual({ ok: true, id: 'feed99' });
+    });
+
+    it('serves the stored video at its signed URL only', async () => {
+      const { service, prisma } = makeService();
+      prisma.storyOption.findUnique.mockResolvedValue({ reelVideoData: Buffer.from('video') });
+      const url = service.mediaUrl('o2', 'reel');
+      const signature = url.split('/').pop()!;
+      expect((await service.getMedia('o2', 'reel', signature)).toString()).toBe('video');
+      await expect(service.getMedia('o2', 'reel', 'forged.mp4')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('accepts IG_REEL as a destination in settings', async () => {
+      const { service, prisma } = makeService();
+      prisma.storySettings.upsert = jest.fn(async ({ update }: any) => update);
+      await expect(service.updateSettings('org1', { destinations: ['ig_reel', 'IG_STORY'] })).resolves.toMatchObject({
+        destinations: ['IG_REEL', 'IG_STORY'],
+      });
+    });
   });
 });

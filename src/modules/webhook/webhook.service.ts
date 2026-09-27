@@ -7,6 +7,7 @@ import { ShopifyService } from '../shopify/shopify.service';
 import { ConversationService } from '../conversations/conversation.service';
 import { StoriesService } from '../stories/stories.service';
 import { ReplyEngineService, type ReplyOutcome } from '../catalog/reply-engine.service';
+import { PostTaggingService } from '../catalog/post-tagging.service';
 import { hmacSha256Hex, timingSafeEqualString } from '../../common/hmac';
 
 @Injectable()
@@ -22,6 +23,7 @@ export class WebhookService {
     private readonly conversations: ConversationService,
     private readonly stories: StoriesService,
     private readonly replies: ReplyEngineService,
+    private readonly postTagging: PostTaggingService,
   ) {}
 
   verifyWebhook(mode: string, token: string, challenge: string): string | null {
@@ -141,6 +143,14 @@ export class WebhookService {
         // merchant channel, so route them before the channel lookup below.
         const messages: any[] = [];
         for (const msg of change.value.messages || []) {
+          // "Kya isme X hai?" answers from a seller about their new post.
+          if (this.postTagging.isTagAnswer(msg)) {
+            if (!(await this.claimEvent(msg.id, 'whatsapp_message'))) continue;
+            await this.postTagging
+              .handleTagAnswer(msg)
+              .catch((e) => this.logger.error(`Post tag answer failed: ${e.message}`));
+            continue;
+          }
           if (!(await this.stories.isStoryReply(msg, phoneNumberId))) {
             messages.push(msg);
             continue;
@@ -327,6 +337,25 @@ export class WebhookService {
 
     if (entry.changes) {
       for (const change of entry.changes) {
+        // The Page published something: tag it now and ask the seller, instead
+        // of waiting for the daily tagging run or its first comment.
+        if (
+          change.field === 'feed' &&
+          change.value?.verb === 'add' &&
+          ['photo', 'status', 'video', 'post'].includes(change.value?.item) &&
+          String(change.value?.from?.id || '') === String(pageId) &&
+          change.value?.post_id
+        ) {
+          const postId = String(change.value.post_id);
+          if (!(await this.claimEvent(`newpost:${postId}`, 'facebook_post'))) continue;
+          setImmediate(() => {
+            this.postTagging
+              .ensurePostContext(brandId, channel.id, postId)
+              .catch((e) => this.logger.warn(`Tagging new Page post ${postId} failed: ${e.message}`));
+          });
+          continue;
+        }
+
         if (change.field === 'feed' && change.value?.item === 'comment') {
           const commentVal = change.value;
           const commentId = commentVal.comment_id;

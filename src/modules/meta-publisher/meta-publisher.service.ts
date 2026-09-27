@@ -470,6 +470,26 @@ export class MetaPublisherService {
     return this.publishInstagramMedia(igUserId, { image_url: imageUrl, caption }, accessToken, 'post', opts);
   }
 
+  /**
+   * Publishes an MP4 at a public URL as a Reel that also shows in the feed.
+   * Video takes Meta longer to process than a photo, so this waits longer.
+   */
+  async publishInstagramReel(
+    igUserId: string,
+    videoUrl: string,
+    caption: string,
+    accessToken: string,
+    opts: { pollIntervalMs?: number; maxPolls?: number } = {},
+  ): Promise<string> {
+    return this.publishInstagramMedia(
+      igUserId,
+      { media_type: 'REELS', video_url: videoUrl, caption, share_to_feed: 'true' },
+      accessToken,
+      'reel',
+      { pollIntervalMs: opts.pollIntervalMs ?? 5000, maxPolls: opts.maxPolls ?? 36 },
+    );
+  }
+
   /** Posts a photo with a message to a Facebook Page's feed. Needs pages_manage_posts. */
   async publishFacebookPhoto(pageId: string, imageUrl: string, message: string, pageToken: string): Promise<string> {
     const url = new URL(graphUrl(`/${pageId}/photos`));
@@ -536,7 +556,7 @@ export class MetaPublisherService {
     igUserId: string,
     params: Record<string, string>,
     accessToken: string,
-    kind: 'story' | 'post',
+    kind: 'story' | 'post' | 'reel',
     opts: { pollIntervalMs?: number; maxPolls?: number },
   ): Promise<string> {
     const pollIntervalMs = opts.pollIntervalMs ?? 3000;
@@ -557,7 +577,7 @@ export class MetaPublisherService {
       const status = await this.graphJson(await fetch(statusUrl, { headers: auth }), 'read container status');
       if (status.status_code === 'FINISHED') break;
       if (status.status_code === 'ERROR' || status.status_code === 'EXPIRED') {
-        throw new Error(`Instagram rejected the ${kind} image: ${status.status || status.status_code}`);
+        throw new Error(`Instagram rejected the ${kind} ${kind === 'reel' ? 'video' : 'image'}: ${status.status || status.status_code}`);
       }
       if (i === maxPolls - 1) throw new Error(`Instagram did not finish processing the ${kind} in time`);
       await new Promise((r) => setTimeout(r, pollIntervalMs));
