@@ -173,7 +173,7 @@ export class CatalogController {
       senderId: 'preview',
       postId: body?.postId || null,
       conversationId: null,
-    });
+    }, { preview: true });
   }
 }
 
