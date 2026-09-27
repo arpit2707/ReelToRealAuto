@@ -81,6 +81,8 @@ model Organization {
   postOfferingLinks PostOfferingLink[]
   leads             Lead[]
   postTagRuns       PostTagRun[]
+  pageProfiles      PageProfile[]
+  socialPosts       SocialPost[]
 }
 
 model OrganizationMember {
@@ -121,6 +123,7 @@ model Channel {
   metadata             Json?
   isActive             Boolean         @default(true)
   conversations        Conversation[]
+  pageProfile          PageProfile?
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
 
@@ -490,7 +493,7 @@ model StorySettings {
   sendTime            String       @default("09:00")
   postTime            String       @default("19:00")
   optionCount         Int          @default(5)
-  // IG_STORY | IG_FEED | FB_FEED
+  // IG_STORY | IG_FEED | IG_REEL | FB_FEED
   destinations        String[]     @default(["IG_STORY"])
   // Channel.id of the Facebook Page for FB_FEED; the org's first active one when null.
   facebookChannelId   String?
@@ -504,9 +507,14 @@ model StoryBatch {
   id               String        @id @default(uuid())
   orgId            String
   org              Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  // Calendar day in the org's timezone (YYYY-MM-DD); one batch per org per day.
+  // Calendar day in the org's timezone (YYYY-MM-DD). One DAILY batch per org
+  // per day; OWN batches (the seller's own photos) can be any number.
   forDate          String
+  // DAILY | OWN
+  kind             String        @default("DAILY")
   status           String        @default("GENERATING")
+  // Set once the "you have not picked yet" nudge went out.
+  reminderSentAt   DateTime?
   waRecipient      String?
   selectedOptionId String?
   publishedMediaId String?
@@ -514,6 +522,10 @@ model StoryBatch {
   trendKeywords    String[]      @default([])
   // Option the merchant is currently describing changes for on WhatsApp.
   editingOptionId  String?
+  // IMAGE | CAPTION: what the next text message changes.
+  editingMode      String?
+  // Edit mode lapses after a while, so a later chat is not read as an edit.
+  editingStartedAt DateTime?
   // When the picked option is due to go live (status SCHEDULED).
   scheduledFor     DateTime?
   // { IG_STORY: { ok, id?, error? }, ... }
@@ -523,7 +535,7 @@ model StoryBatch {
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 
-  @@unique([orgId, forDate])
+  @@index([orgId, forDate])
   @@index([status, createdAt])
   @@index([status, scheduledFor])
 }
@@ -545,9 +557,61 @@ model StoryOption {
   keywords       String[]   @default([])
   hashtags       String[]   @default([])
   finalImageData Bytes?
+  // 7-second MP4 made from the image for IG_REEL, built at publish time.
+  reelVideoData  Bytes?
+  // AI | OWN (a photo the seller sent or uploaded; never re-lettered)
+  source         String     @default("AI")
+  // Catalog item the post promotes, so comments on it get that item's price.
+  offeringId     String?
   createdAt      DateTime   @default(now())
 
   @@unique([batchId, position])
+}
+
+// Per-page overrides of the business profile, for sellers who run more than
+// one page (e.g. a bridal page and a boutique page) from one workspace. Empty
+// fields fall back to BusinessProfile.
+model PageProfile {
+  id          String       @id @default(uuid())
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  channelId   String       @unique
+  channel     Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  description String?
+  audience    String?
+  tone        String?
+  language    String?
+  // [{ q, a }], answered before the business-wide FAQs.
+  faqs        Json?
+  // When set, replies on this page only suggest these catalog items.
+  offeringIds String[]     @default([])
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([orgId])
+}
+
+// What we know about one Instagram/Facebook post: its caption (so the AI knows
+// what the post says) and the seller's own note ("offer valid till Sunday").
+model SocialPost {
+  id        String       @id @default(uuid())
+  orgId     String
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  channelId String?
+  platform  String
+  postId    String
+  caption   String?
+  mediaUrl  String?
+  permalink String?
+  note      String?
+  // META (found on the page) | DAILY_POST (published by us)
+  source    String       @default("META")
+  // When the AI last matched it against the catalog; null means not yet.
+  taggedAt  DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@unique([orgId, postId])
 }
 
 // ---------------------------------------------------------------------------
@@ -680,6 +744,8 @@ model PostOfferingLink {
   reason        String?
   likes         Int?
   commentsCount Int?
+  // When the seller was asked on WhatsApp whether this post shows this item.
+  askedAt       DateTime?
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 

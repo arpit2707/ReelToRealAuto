@@ -7,6 +7,15 @@ export type StoryIdea = {
   caption: string;
   imagePrompt: string;
   seedKeyword: string;
+  // Catalog item the idea promotes, when it promotes one.
+  offeringId?: string | null;
+};
+
+export type OwnPhotoDetails = {
+  title: string;
+  caption: string;
+  seedKeyword: string;
+  offeringId: string | null;
 };
 
 export type BusinessContext = {
@@ -15,7 +24,7 @@ export type BusinessContext = {
   description?: string | null;
   industry?: string | null;
   persona?: unknown;
-  products: Array<{ title: string; price: number; currency: string }>;
+  products: Array<{ id?: string; title: string; price: number; currency: string }>;
   recentTitles: string[];
   forDate: string;
   // Today's researched keywords; each idea should target one of them.
@@ -67,6 +76,7 @@ export class GeminiClient {
               caption: { type: 'STRING' },
               imagePrompt: { type: 'STRING' },
               seedKeyword: { type: 'STRING' },
+              offeringId: { type: 'STRING' },
             },
             required: ['title', 'label', 'idea', 'caption', 'imagePrompt', 'seedKeyword'],
           },
@@ -127,6 +137,62 @@ export class GeminiClient {
       generationConfig: { temperature: 0.1, responseMimeType: 'application/json', responseSchema },
     });
     return JSON.parse(extractText(json)) as T;
+  }
+
+  /**
+   * Headline, caption and keyword for a photo the seller sent themselves, and
+   * which catalog item it shows. A caption the seller wrote is kept as is.
+   */
+  async describeOwnPhoto(
+    image: { data: Buffer; mimeType: string },
+    ctx: {
+      brandName: string;
+      description?: string | null;
+      products: Array<{ id: string; title: string }>;
+      sellerCaption?: string | null;
+    },
+  ): Promise<OwnPhotoDetails> {
+    const prompt = [
+      `You write Instagram posts for "${ctx.brandName}", an Indian small business.`,
+      ctx.description ? `About the business: ${ctx.description}` : '',
+      ctx.products.length
+        ? `Catalog (id | title):\n${ctx.products
+            .slice(0, 40)
+            .map((p) => `- ${p.id} | ${p.title}`)
+            .join('\n')}`
+        : '',
+      ctx.sellerCaption ? `The owner's caption for this photo: ${ctx.sellerCaption.slice(0, 500)}` : '',
+      'Look at the attached photo and return:',
+      '- title: at most 24 characters naming what the post is about',
+      ctx.sellerCaption
+        ? '- caption: repeat the owner caption exactly'
+        : '- caption: 1 to 3 short lines in a warm Hinglish brand voice with a call to action, no hashtags, no prices',
+      '- seedKeyword: the search phrase customers would use for this (lowercase, 1 to 4 words)',
+      '- offeringId: the catalog id the photo clearly shows, or an empty string',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const r = await this.generateJson<Partial<OwnPhotoDetails>>(
+      prompt,
+      {
+        type: 'OBJECT',
+        properties: {
+          title: { type: 'STRING' },
+          caption: { type: 'STRING' },
+          seedKeyword: { type: 'STRING' },
+          offeringId: { type: 'STRING' },
+        },
+        required: ['title', 'caption', 'seedKeyword'],
+      },
+      image,
+    );
+    const ids = new Set(ctx.products.map((p) => p.id));
+    return {
+      title: String(r?.title || '').trim().slice(0, 24),
+      caption: (ctx.sellerCaption || String(r?.caption || '')).trim().slice(0, 1000),
+      seedKeyword: String(r?.seedKeyword || '').trim().toLowerCase().slice(0, 60),
+      offeringId: r?.offeringId && ids.has(r.offeringId) ? r.offeringId : null,
+    };
   }
 
   /** Returns raw image bytes (usually PNG) for a vertical story image. */
@@ -225,7 +291,7 @@ export class GeminiClient {
 export function buildIdeasPrompt(ctx: BusinessContext, count: number): string {
   const products = ctx.products
     .slice(0, 10)
-    .map((p) => `- ${p.title} (${p.currency} ${p.price})`)
+    .map((p) => `- ${p.id ? `${p.id} | ` : ''}${p.title} (${p.currency} ${p.price})`)
     .join('\n');
   const persona = ctx.persona ? JSON.stringify(ctx.persona).slice(0, 800) : '';
   const trends = (ctx.trendKeywords || []).slice(0, 10);
@@ -237,7 +303,7 @@ export function buildIdeasPrompt(ctx: BusinessContext, count: number): string {
     ctx.industry ? `Industry: ${ctx.industry}` : '',
     ctx.description ? `About the business: ${ctx.description}` : '',
     persona ? `Brand persona: ${persona}` : '',
-    products ? `Products:\n${products}` : '',
+    products ? `Products${ctx.products.some((p) => p.id) ? ' (id | title)' : ''}:\n${products}` : '',
     trends.length
       ? `Trending keywords in this niche today, best first: ${trends.join('; ')}. Build each idea around a different one.`
       : '',
@@ -249,6 +315,9 @@ export function buildIdeasPrompt(ctx: BusinessContext, count: number): string {
     '- caption: the Instagram/Facebook caption, 1 to 3 short lines in the brand voice with a call to action, no hashtags',
     '- imagePrompt: a detailed prompt for an image model to draw the visual, with no text in the image',
     '- seedKeyword: the trending keyword this idea targets (lowercase, 1 to 4 words)',
+    ctx.products.some((p) => p.id)
+      ? '- offeringId: the id of the product the idea promotes, or an empty string when it promotes none'
+      : '',
   ]
     .filter(Boolean)
     .join('\n');
@@ -288,6 +357,7 @@ export function parseIdeas(text: string): StoryIdea[] {
       seedKeyword: String(r?.seedKeyword || '')
         .trim()
         .toLowerCase(),
+      offeringId: r?.offeringId ? String(r.offeringId).trim() : null,
     }))
     .filter((r) => r.title && r.idea && r.imagePrompt && r.seedKeyword);
 }

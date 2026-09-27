@@ -325,6 +325,202 @@ describe('ReplyEngineService', () => {
   });
 });
 
+describe('post and page context', () => {
+  const activeProfile = {
+    industry: 'APPAREL',
+    onboardedAt: new Date('2026-09-01'),
+    activatedAt: new Date('2026-09-01'),
+    services: ['COMMENT_REPLY', 'DM_REPLY'],
+    businessName: 'Kurta Co',
+    tone: 'friendly',
+  };
+  const ctx = (over: any = {}) => ({
+    business: {},
+    playbook: { goal: 'ORDER', lead_fields: [], rules: [] },
+    offerings: [],
+    post: null,
+    style: { audience: null, tone: null, language: null },
+    goal_state: {},
+    recent_messages: [],
+    allowed_prices: [],
+    ...over,
+  });
+  const req = {
+    orgId: 'org',
+    brandName: 'B',
+    platform: 'INSTAGRAM' as const,
+    eventType: 'comment' as const,
+    text: 'offer kya hai?',
+    senderId: 's',
+    postId: 'media1',
+    channelId: 'ch1',
+  };
+
+  function engineWith(context: any, tagging?: any) {
+    const prisma: any = {
+      businessProfile: { findUnique: jest.fn().mockResolvedValue(activeProfile) },
+    };
+    const ai = { generateReply: jest.fn().mockResolvedValue({ private_dm: 'hi' }) };
+    const engine = new ReplyEngineService(
+      prisma,
+      ai as any,
+      { build: jest.fn().mockResolvedValue(context) } as any,
+      {} as any,
+      tagging,
+    );
+    return { engine, ai };
+  }
+
+  it("sends the post's caption and the seller's note to the AI", async () => {
+    const { engine, ai } = engineWith(
+      ctx({ post: { post_id: 'media1', caption: 'Aaj 20% off', note: 'Offer till Sunday' } }),
+    );
+    await engine.reply(req);
+    expect(ai.generateReply.mock.calls[0][0].post_context).toEqual({
+      post_id: 'media1',
+      caption: 'Aaj 20% off',
+      note: 'Offer till Sunday',
+    });
+  });
+
+  it("uses the page's own tone over the business tone", async () => {
+    const { engine, ai } = engineWith(
+      ctx({ style: { audience: 'Brides', tone: 'formal', language: 'english' } }),
+    );
+    await engine.reply(req);
+    const persona = ai.generateReply.mock.calls[0][0].brand_persona;
+    expect(persona.tone).toBe('formal');
+    expect(persona.language_mode).toBe('english');
+    expect(persona.custom_instructions).toContain('Brides');
+  });
+
+  it('learns a new post before answering its comment, but not in a preview', async () => {
+    const tagging = { ensurePostContext: jest.fn().mockResolvedValue(undefined) };
+    const { engine } = engineWith(ctx(), tagging);
+    await engine.reply(req);
+    expect(tagging.ensurePostContext).toHaveBeenCalledWith('org', 'ch1', 'media1');
+    tagging.ensurePostContext.mockClear();
+    await engine.reply({ ...req, preview: true });
+    expect(tagging.ensurePostContext).not.toHaveBeenCalled();
+  });
+
+  it('still replies when learning the post fails', async () => {
+    const tagging = { ensurePostContext: jest.fn().mockRejectedValue(new Error('graph down')) };
+    const { engine } = engineWith(ctx(), tagging);
+    expect(await engine.reply(req)).not.toBeNull();
+  });
+
+  it('builds context from the page overrides and the stored caption', async () => {
+    const prisma: any = {
+      businessProfile: {
+        findUnique: jest.fn().mockResolvedValue({
+          industry: 'APPAREL',
+          description: 'Kurtas for women',
+          tone: 'friendly',
+          faqs: [{ q: 'COD?', a: 'Yes' }],
+        }),
+      },
+      pageProfile: {
+        findFirst: jest.fn().mockResolvedValue({
+          description: 'Bridal lehengas only',
+          tone: 'formal',
+          language: null,
+          audience: null,
+          faqs: [{ q: 'Trial?', a: 'Saturday' }],
+          offeringIds: ['o1'],
+        }),
+      },
+      socialPost: { findUnique: jest.fn().mockResolvedValue({ caption: 'New drop', note: 'Only size M left' }) },
+      postOfferingLink: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([]) },
+      offering: { findMany: jest.fn().mockResolvedValue([]) },
+      inboxMessage: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const { ReplyContextService } = jest.requireActual('./reply-context.service');
+    const service = new ReplyContextService(prisma, { availability: jest.fn() } as any);
+    const built = await service.build({ orgId: 'org', text: 'lehenga', postId: 'p1', channelId: 'ch1' });
+    expect(built.business.description).toBe('Bridal lehengas only');
+    expect(built.business.faqs.map((f: any) => f.q)).toEqual(['Trial?', 'COD?']);
+    expect(built.style).toEqual({ audience: null, tone: 'formal', language: null });
+    expect(built.post).toEqual({ post_id: 'p1', caption: 'New drop', note: 'Only size M left' });
+    // The page only sells o1, so the search is limited to it.
+    expect(prisma.offering.findMany.mock.calls[0][0].where.id).toEqual({ in: ['o1'] });
+  });
+});
+
+describe('PostTaggingService', () => {
+  function make(over: any = {}) {
+    const prisma: any = {
+      socialPost: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        upsert: jest.fn().mockResolvedValue({}),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      channel: { findFirst: jest.fn().mockResolvedValue({ id: 'ch1', platform: 'INSTAGRAM' }) },
+      businessProfile: {
+        findUnique: jest.fn().mockResolvedValue({ autoTagPosts: true }),
+        findMany: jest.fn().mockResolvedValue([{ orgId: 'a' }, { orgId: 'b' }]),
+      },
+      offering: { count: jest.fn().mockResolvedValue(3), findMany: jest.fn().mockResolvedValue([]) },
+      postOfferingLink: {
+        count: jest.fn().mockResolvedValue(0),
+        updateMany: jest.fn(),
+        create: jest.fn(),
+      },
+      postTagRun: { findFirst: jest.fn() },
+      ...over,
+    };
+    const post = {
+      id: 'media1',
+      text: 'New kurta drop',
+      mediaUrl: null,
+      permalink: 'https://ig/p/1',
+      likes: 1,
+      commentsCount: 2,
+    };
+    const posts: any = { getPost: jest.fn().mockResolvedValue(post) };
+    const gemini: any = { isConfigured: () => false };
+    const context: any = { search: jest.fn().mockResolvedValue([]) };
+    const meta: any = { sendWhatsAppImageButtons: jest.fn(), sendInteractiveButtonMessage: jest.fn() };
+    const { PostTaggingService } = jest.requireActual('./post-tagging.service');
+    const service = new PostTaggingService(prisma, posts, gemini, context, meta);
+    return { service, prisma, posts };
+  }
+
+  it('fetches and tags a post the first time it is commented on', async () => {
+    const { service, prisma, posts } = make();
+    await service.ensurePostContext('org', 'ch1', 'media1');
+    expect(posts.getPost).toHaveBeenCalledWith('org', 'ch1', 'media1');
+    const saved = prisma.socialPost.upsert.mock.calls[0][0];
+    expect(saved.create).toMatchObject({ postId: 'media1', caption: 'New kurta drop', channelId: 'ch1' });
+    expect(saved.create.taggedAt).toBeInstanceOf(Date);
+  });
+
+  it('does nothing for a post it already knows', async () => {
+    const { service, prisma, posts } = make();
+    prisma.socialPost.findUnique.mockResolvedValue({ taggedAt: new Date() });
+    await service.ensurePostContext('org', 'ch1', 'media1');
+    expect(posts.getPost).not.toHaveBeenCalled();
+  });
+
+  it('only stores the caption when auto-tagging is off', async () => {
+    const { service, prisma } = make();
+    prisma.businessProfile.findUnique.mockResolvedValue({ autoTagPosts: false });
+    await service.ensurePostContext('org', 'ch1', 'media1');
+    expect(prisma.socialPost.upsert.mock.calls[0][0].create.taggedAt).toBeNull();
+  });
+
+  it('runs the daily tagging from the last saved run, not a timer', async () => {
+    const { service, prisma } = make();
+    const now = new Date('2026-09-28T12:00:00Z');
+    prisma.postTagRun.findFirst.mockImplementation(async ({ where }: any) =>
+      where.orgId === 'a' ? { createdAt: new Date('2026-09-28T02:00:00Z') } : { createdAt: new Date('2026-09-26T00:00:00Z') },
+    );
+    const run = jest.spyOn(service, 'run').mockResolvedValue({} as any);
+    expect(await service.runDue(now)).toBe(1);
+    expect(run).toHaveBeenCalledWith('b');
+  });
+});
+
 describe('onboarding', () => {
   it('lists what is missing before automation can start', () => {
     expect(missingForActivation(null)).toEqual([

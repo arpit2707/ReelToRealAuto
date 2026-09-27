@@ -6,6 +6,7 @@ import {
   HttpCode,
   Logger,
   Param,
+  ParseIntPipe,
   Post,
   Put,
   Res,
@@ -46,7 +47,7 @@ export class StoriesController {
     return { accepted: true };
   }
 
-  /** Public, signed image URLs that WhatsApp and Instagram fetch. */
+  /** Public, signed image (and Reel video) URLs that WhatsApp and Instagram fetch. */
   @Get('media/:optionId/:variant/:signature')
   async media(
     @Param('optionId') optionId: string,
@@ -55,7 +56,7 @@ export class StoriesController {
     @Res() res: Response,
   ) {
     const image = await this.stories.getMedia(optionId, variant, signature);
-    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Content-Type', variant === 'reel' ? 'video/mp4' : 'image/jpeg');
     res.setHeader('Cache-Control', 'public, max-age=86400');
     res.send(image);
   }
@@ -95,17 +96,86 @@ export class StoriesController {
     return this.stories.listBatches(user.orgId);
   }
 
-  /** Generates today's ideas right away (replacing today's batch) so a merchant can try it. */
+  /** Scheduled posts, soonest first. */
+  @Get('upcoming')
+  @UseGuards(JwtAuthGuard)
+  upcoming(@CurrentUser() user: JwtPayload) {
+    return this.stories.listUpcoming(user.orgId);
+  }
+
+  @Post('batches/:id/options/:position/pick')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('OWNER', 'ADMIN')
+  pick(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Param('position', ParseIntPipe) position: number,
+    @Body() body: { when?: 'now' | 'tomorrow' | 'scheduled'; at?: string | null },
+  ) {
+    return this.stories.pickFromDashboard(user.orgId, id, position, body || {});
+  }
+
+  @Post('batches/:id/options/:position/edit')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('OWNER', 'ADMIN')
+  edit(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Param('position', ParseIntPipe) position: number,
+    @Body() body: { instruction?: string },
+  ) {
+    return this.stories.editFromDashboard(user.orgId, id, position, body?.instruction || '');
+  }
+
+  @Put('batches/:id/options/:position/caption')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('OWNER', 'ADMIN')
+  caption(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Param('position', ParseIntPipe) position: number,
+    @Body() body: { caption?: string | null },
+  ) {
+    return this.stories.setCaption(user.orgId, id, position, body?.caption ?? null);
+  }
+
+  @Post('batches/:id/cancel')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('OWNER', 'ADMIN')
+  cancel(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.stories.cancelFromDashboard(user.orgId, id);
+  }
+
+  /** The seller's own photo, posted as it is; `at` schedules it. */
+  @Post('own')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('OWNER', 'ADMIN')
+  own(
+    @CurrentUser() user: JwtPayload,
+    @Body() body: { image?: string; caption?: string | null; at?: string | null },
+  ) {
+    return this.stories.uploadOwnPost(user.orgId, body || {});
+  }
+
+  /**
+   * Generates today's ideas right away (replacing today's batch). `via: "web"`
+   * only makes them for picking in the dashboard; otherwise they also go to
+   * WhatsApp when a number is set. Refused when today's pick is scheduled or
+   * already posted.
+   */
   @Post('run-now')
   @HttpCode(202)
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('OWNER', 'ADMIN')
-  runNow(@CurrentUser() user: JwtPayload) {
+  async runNow(@CurrentUser() user: JwtPayload, @Body() body: { via?: 'whatsapp' | 'web' } = {}) {
+    await this.stories.assertCanRegenerate(user.orgId);
+    const settings = await this.stories.getSettings(user.orgId);
+    const via = body?.via === 'web' || !settings.whatsappNumber ? 'web' : 'whatsapp';
     setImmediate(() => {
       this.stories
-        .generateBatch(user.orgId, { force: true })
+        .generateBatch(user.orgId, { force: true, via })
         .catch((e) => this.logger.error(`Run-now failed for org ${user.orgId}: ${e.message}`));
     });
-    return { accepted: true };
+    return { accepted: true, via };
   }
 }

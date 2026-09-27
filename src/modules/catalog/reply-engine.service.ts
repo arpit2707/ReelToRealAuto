@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
@@ -7,6 +7,7 @@ import {
 } from '../ai-client/ai-client.service';
 import { ReplyContextService, type GoalState } from './reply-context.service';
 import { LeadsService } from './leads.service';
+import { PostTaggingService } from './post-tagging.service';
 import { unknownPrices } from './price-guard';
 import {
   replyBlockedReason,
@@ -26,9 +27,15 @@ export type ReplyRequest = {
   senderName?: string | null;
   postId?: string | null;
   conversationId?: string | null;
+  // Channel.id the message came in on; picks that page's own context.
+  channelId?: string | null;
   // A seller trying the AI from the dashboard; works before onboarding too.
   preview?: boolean;
 };
+
+// A comment on a brand-new post waits this long for the post to be matched to
+// the catalog; after that the reply goes out with what is known.
+const POST_CONTEXT_WAIT_MS = 8000;
 
 export type ReplyOutcome = GeneratedReplyResult & {
   offering_ids: string[];
@@ -81,7 +88,24 @@ export class ReplyEngineService {
     private readonly aiClient: AiClientService,
     private readonly context: ReplyContextService,
     private readonly leads: LeadsService,
+    @Optional() private readonly tagging?: PostTaggingService,
   ) {}
+
+  /** Learns a new post's caption and item before replying to its first comments. */
+  private async ensurePostContext(req: ReplyRequest) {
+    if (!this.tagging || !req.postId || !req.channelId || req.platform === 'WHATSAPP') return;
+    let timer: NodeJS.Timeout | undefined;
+    const work = this.tagging
+      .ensurePostContext(req.orgId, req.channelId, req.postId)
+      .catch((e) => this.logger.warn(`Post context for ${req.postId} failed: ${e.message}`));
+    await Promise.race([
+      work,
+      new Promise((r) => {
+        timer = setTimeout(r, POST_CONTEXT_WAIT_MS);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+  }
 
   async reply(
     req: ReplyRequest,
@@ -118,12 +142,22 @@ export class ReplyEngineService {
         return null;
     }
 
+    if (!isPreview) await this.ensurePostContext(req);
+
     const ctx = await this.context.build({
       orgId: req.orgId,
       text: req.text,
       postId: req.postId,
       conversationId: req.conversationId,
+      channelId: req.channelId,
     });
+    // The page's own style when it has one, else the business profile's.
+    const style = {
+      audience: ctx.style?.audience ?? profile?.audience ?? null,
+      tone: ctx.style?.tone ?? profile?.tone ?? profile?.replyTone ?? null,
+      language:
+        ctx.style?.language ?? profile?.language ?? profile?.replyLanguage ?? null,
+    };
 
     const ai = await this.aiClient.generateReply({
       brand_id: req.orgId,
@@ -131,19 +165,23 @@ export class ReplyEngineService {
       event_type: req.eventType,
       message_text: req.text,
       sender_id: req.senderId,
-      ...(req.postId ? { post_context: { post_id: req.postId } } : {}),
+      ...(req.postId
+        ? {
+            post_context: {
+              post_id: req.postId,
+              ...(ctx.post?.caption ? { caption: ctx.post.caption } : {}),
+              ...(ctx.post?.note ? { note: ctx.post.note } : {}),
+            },
+          }
+        : {}),
       brand_persona: {
         brand_name: profile?.businessName || req.brandName,
-        ...((profile?.tone || profile?.replyTone) &&
-        TONES.includes((profile?.tone || profile?.replyTone) as string)
-          ? { tone: (profile?.tone || profile?.replyTone) as string }
+        ...(style.tone && TONES.includes(style.tone) ? { tone: style.tone } : {}),
+        ...(style.language && LANGUAGES.includes(style.language)
+          ? { language_mode: style.language }
           : {}),
-        ...((profile?.language || profile?.replyLanguage) &&
-        LANGUAGES.includes((profile?.language || profile?.replyLanguage) as string)
-          ? { language_mode: (profile?.language || profile?.replyLanguage) as string }
-          : {}),
-        ...(styleNotes(profile)
-          ? { custom_instructions: styleNotes(profile) as string }
+        ...(styleNotes(style)
+          ? { custom_instructions: styleNotes(style) as string }
           : {}),
       },
       business: ctx.business,
