@@ -21,3 +21,17 @@ Thumbs.db
 env.generated.txt
 
 /generated/prisma
+
+# Generated media and video generator assets
+**/media/
+**/generated_reels/
+*.mp4
+*.mp3
+*.wav
+*.jpg
+*.jpeg
+*.png
+
+# Custom and automation scripts
+common_scripts/
+scripts/
