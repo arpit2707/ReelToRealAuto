@@ -187,12 +187,14 @@ export class StoriesService {
 
     try {
       const [products, recent] = await Promise.all([
-        this.prisma.product.findMany({
-          where: { orgId },
-          orderBy: { updatedAt: 'desc' },
-          take: 10,
-          select: { title: true, price: true, currency: true },
-        }),
+        this.prisma.offering
+          .findMany({
+            where: { orgId, isActive: true },
+            orderBy: { updatedAt: 'desc' },
+            take: 10,
+            select: { title: true, priceMin: true, currency: true },
+          })
+          .then((rows) => rows.map((r) => ({ title: r.title, price: r.priceMin ?? 0, currency: r.currency }))),
         this.prisma.storyOption.findMany({
           where: { batch: { orgId, id: { not: batch.id } } },
           orderBy: { createdAt: 'desc' },

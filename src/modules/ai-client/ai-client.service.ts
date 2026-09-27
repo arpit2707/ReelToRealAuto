@@ -18,7 +18,23 @@ export interface GenerateReplyPayload {
     emoji_density?: string;
     custom_instructions?: string;
   };
+  // Catalog-aware context built by ReplyContextService. Older AI service
+  // versions ignore these fields.
+  business?: Record<string, unknown>;
+  playbook?: {
+    goal: string;
+    lead_fields: Array<{ key: string; label: string; ask: string }>;
+    rules: string[];
+  };
+  offerings?: Array<Record<string, unknown>>;
+  goal_state?: Record<string, unknown>;
+  recent_messages?: Array<{ from: string; text: string }>;
 }
+
+// SEND_LINK: shared a price and link. ASK_FIELD: asked for a missing lead
+// detail. CREATE_LEAD: every required detail is in. HANDOFF: a person must take
+// over. ANSWER: anything else.
+export type ReplyAction = 'SEND_LINK' | 'ASK_FIELD' | 'CREATE_LEAD' | 'HANDOFF' | 'ANSWER';
 
 export interface GeneratedReplyResult {
   public_reply: string | null;
@@ -28,6 +44,9 @@ export interface GeneratedReplyResult {
   requires_human_attention: boolean;
   detected_product_sku?: string | null;
   reasoning?: string | null;
+  action?: ReplyAction | null;
+  offering_ids?: string[] | null;
+  collected_fields?: Record<string, string> | null;
 }
 
 @Injectable()

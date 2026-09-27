@@ -5,22 +5,29 @@ import { PrismaService } from '../../prisma/prisma.service';
 export class WorkspaceService {
   constructor(private readonly prisma: PrismaService) {}
 
-  listProducts(orgId: string) {
-    return this.prisma.product.findMany({
-      where: { orgId },
+  // Kept in the old product shape for screens that still read it; the data now
+  // comes from the catalog (Offering), which replaced the Product table.
+  async listProducts(orgId: string) {
+    const rows = await this.prisma.offering.findMany({
+      where: { orgId, isActive: true },
       orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        sku: true,
-        title: true,
-        price: true,
-        currency: true,
-        inStock: true,
-        stockQuantity: true,
-        sizes: true,
-        colors: true,
-        checkoutUrl: true,
-      },
+      include: { variants: { orderBy: { position: 'asc' } } },
+    });
+    return rows.map((o) => {
+      const stock = o.variants.reduce((n, v) => n + (v.stock ?? 0), 0);
+      const tracked = o.variants.some((v) => v.stock != null);
+      return {
+        id: o.id,
+        sku: o.sku || o.id.slice(0, 8),
+        title: o.title,
+        price: o.priceMin ?? 0,
+        currency: o.currency,
+        inStock: tracked ? stock > 0 : true,
+        stockQuantity: tracked ? stock : 0,
+        sizes: o.variants.map((v) => v.label),
+        colors: [] as string[],
+        checkoutUrl: o.actionUrl || '',
+      };
     });
   }
 

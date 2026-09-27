@@ -17,6 +17,7 @@ import { ChannelConnectModule } from './modules/channels/channel-connect.module'
 import { WorkspaceModule } from './modules/workspace/workspace.module';
 import { StoriesModule } from './modules/stories/stories.module';
 import { PostsModule } from './modules/posts/posts.module';
+import { CatalogModule } from './modules/catalog/catalog.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { PostsModule } from './modules/posts/posts.module';
     WorkspaceModule,
     StoriesModule,
     PostsModule,
+    CatalogModule,
   ],
   controllers: [AppController],
   providers: [AppService],

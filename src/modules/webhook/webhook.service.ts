@@ -6,6 +6,7 @@ import { MetaPublisherService } from '../meta-publisher/meta-publisher.service';
 import { ShopifyService } from '../shopify/shopify.service';
 import { ConversationService } from '../conversations/conversation.service';
 import { StoriesService } from '../stories/stories.service';
+import { ReplyEngineService, type ReplyOutcome } from '../catalog/reply-engine.service';
 import { hmacSha256Hex, timingSafeEqualString } from '../../common/hmac';
 
 @Injectable()
@@ -20,6 +21,7 @@ export class WebhookService {
     private readonly shopifyService: ShopifyService,
     private readonly conversations: ConversationService,
     private readonly stories: StoriesService,
+    private readonly replies: ReplyEngineService,
   ) {}
 
   verifyWebhook(mode: string, token: string, challenge: string): string | null {
@@ -211,16 +213,17 @@ export class WebhookService {
 
           this.logger.log(`WhatsApp message from ${fromWaId}: "${text}" [Brand: ${brandName}]`);
 
-          const aiResponse = await this.aiClient.generateReply({
-            brand_id: brandId,
-            channel_type: 'whatsapp',
-            event_type: 'dm',
-            message_text: text,
-            sender_id: fromWaId,
-            brand_persona: {
-              brand_name: brandName,
-            },
+          const aiResponse = await this.replies.reply({
+            orgId: brandId,
+            brandName,
+            platform: 'WHATSAPP',
+            eventType: 'dm',
+            text,
+            senderId: fromWaId,
+            senderName: msg.profile?.name || change.value.contacts?.[0]?.profile?.name || null,
+            conversationId: conversation.id,
           });
+          if (!aiResponse) continue;
 
           const replyMessage = aiResponse.private_dm || aiResponse.public_reply;
 
@@ -253,6 +256,7 @@ export class WebhookService {
                 sentiment: aiResponse.sentiment,
                 requiresHuman: aiResponse.requires_human_attention,
                 externalEventId: msg.id || undefined,
+                ...this.outcomeLog(aiResponse),
               },
             })
             .catch((e) => this.logger.error(`Failed to log WhatsApp interaction: ${e.message}`));
@@ -335,14 +339,17 @@ export class WebhookService {
           if (!(await this.claimEvent(commentId, 'facebook_comment'))) continue;
           if (!text || !commentId) continue;
 
-          const aiResponse = await this.aiClient.generateReply({
-            brand_id: brandId,
-            channel_type: 'facebook',
-            event_type: 'comment',
-            message_text: text,
-            sender_id: senderId || 'anonymous',
-            brand_persona: { brand_name: brandName },
+          const aiResponse = await this.replies.reply({
+            orgId: brandId,
+            brandName,
+            platform: 'FACEBOOK',
+            eventType: 'comment',
+            text,
+            senderId: senderId || 'anonymous',
+            senderName: commentVal.from?.name || null,
+            postId: commentVal.post_id || null,
           });
+          if (!aiResponse) continue;
 
           if (aiResponse.public_reply) {
             await this.metaPublisher.replyToFacebookComment(commentId, aiResponse.public_reply, decryptedToken);
@@ -365,6 +372,7 @@ export class WebhookService {
                 sentiment: aiResponse.sentiment,
                 requiresHuman: aiResponse.requires_human_attention,
                 externalEventId: commentId,
+                ...this.outcomeLog(aiResponse),
               },
             })
             .catch((e) => this.logger.error(`Failed to log Facebook comment: ${e.message}`));
@@ -396,14 +404,16 @@ export class WebhookService {
           platformMessageId: mid,
         });
 
-        const aiResponse = await this.aiClient.generateReply({
-          brand_id: brandId,
-          channel_type: 'facebook',
-          event_type: 'dm',
-          message_text: text,
-          sender_id: senderId,
-          brand_persona: { brand_name: brandName },
+        const aiResponse = await this.replies.reply({
+          orgId: brandId,
+          brandName,
+          platform: 'FACEBOOK',
+          eventType: 'dm',
+          text,
+          senderId,
+          conversationId: conversation.id,
         });
+        if (!aiResponse) continue;
 
         if (aiResponse.private_dm) {
           const sent = await this.metaPublisher.sendFacebookMessengerDm(
@@ -433,6 +443,7 @@ export class WebhookService {
               sentiment: aiResponse.sentiment,
               requiresHuman: aiResponse.requires_human_attention,
               externalEventId: mid,
+              ...this.outcomeLog(aiResponse),
             },
           })
           .catch((e) => this.logger.error(`Failed to log Facebook DM: ${e.message}`));
@@ -511,19 +522,17 @@ export class WebhookService {
 
     this.logger.log(`Processing comment [${commentId}] on Brand: ${brandName}`);
 
-    const aiResponse = await this.aiClient.generateReply({
-      brand_id: brandId,
-      channel_type: 'instagram',
-      event_type: 'comment',
-      message_text: text,
-      sender_id: senderId || 'anonymous',
-      post_context: {
-        post_id: mediaId || '',
-      },
-      brand_persona: {
-        brand_name: brandName,
-      },
+    const aiResponse = await this.replies.reply({
+      orgId,
+      brandName,
+      platform: 'INSTAGRAM',
+      eventType: 'comment',
+      text,
+      senderId: senderId || 'anonymous',
+      senderName: commentData.from?.username || null,
+      postId: mediaId || null,
     });
+    if (!aiResponse) return;
 
     if (aiResponse.public_reply) {
       await this.metaPublisher.replyToComment(commentId, aiResponse.public_reply, accessToken);
@@ -547,6 +556,7 @@ export class WebhookService {
           sentiment: aiResponse.sentiment,
           requiresHuman: aiResponse.requires_human_attention,
           externalEventId: commentId,
+          ...this.outcomeLog(aiResponse),
         },
       })
       .catch((e) => this.logger.error(`Failed to log interaction: ${e.message}`));
@@ -585,16 +595,18 @@ export class WebhookService {
 
     this.logger.log(`Processing DM from [${senderId}] on Brand: ${brandName}`);
 
-    const aiResponse = await this.aiClient.generateReply({
-      brand_id: brandId,
-      channel_type: 'instagram',
-      event_type: 'dm',
-      message_text: text,
-      sender_id: senderId,
-      brand_persona: {
-        brand_name: brandName,
-      },
+    const aiResponse = await this.replies.reply({
+      orgId,
+      brandName,
+      platform: 'INSTAGRAM',
+      eventType: 'dm',
+      text,
+      senderId,
+      // A reply to a story or post carries the media it was about.
+      postId: messageData.message?.reply_to?.story?.id || messageData.message?.referral?.ads_context_data?.post_id || null,
+      conversationId: conversation.id,
     });
+    if (!aiResponse) return;
 
     if (aiResponse.private_dm) {
       const sent = await this.metaPublisher.sendPrivateDm(
@@ -623,9 +635,14 @@ export class WebhookService {
           sentiment: aiResponse.sentiment,
           requiresHuman: aiResponse.requires_human_attention,
           externalEventId: mid,
+          ...this.outcomeLog(aiResponse),
         },
       })
       .catch((e) => this.logger.error(`Failed to log interaction: ${e.message}`));
+  }
+
+  private outcomeLog(outcome: ReplyOutcome) {
+    return { offeringIds: outcome.offering_ids, action: outcome.guarded ? 'PRICE_BLOCKED' : outcome.action };
   }
 
   // Auto-replies belong in the thread too, or the inbox shows only one side.

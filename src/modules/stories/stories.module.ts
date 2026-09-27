@@ -11,6 +11,6 @@ import { KeywordResearchService } from './keyword-research.service';
   imports: [CryptoModule, MetaPublisherModule],
   controllers: [StoriesController],
   providers: [StoriesService, GeminiClient, KeywordResearchService, RolesGuard],
-  exports: [StoriesService],
+  exports: [StoriesService, GeminiClient],
 })
 export class StoriesModule {}
