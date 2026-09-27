@@ -8,7 +8,13 @@ import {
 import { ReplyContextService, type GoalState } from './reply-context.service';
 import { LeadsService } from './leads.service';
 import { unknownPrices } from './price-guard';
-import { automationBlock, serviceFor } from './onboarding';
+import {
+  replyBlockedReason,
+  automationBlock,
+  serviceFor,
+  TONES,
+  LANGUAGES,
+} from './onboarding';
 
 export type ReplyRequest = {
   orgId: string;
@@ -38,6 +44,19 @@ const SAFE_DM =
   'Thank you! Iski exact price aur details hamari team aapko thodi der me bhej degi.';
 const SAFE_PUBLIC = 'Thank you! Details DM me bhej di hain.';
 
+// The catalog prompt reads only custom_instructions for style, so the setup
+// answers are spelled out there as well.
+function styleNotes(
+  p: { audience?: string | null; tone?: string | null; language?: string | null } | null,
+): string | null {
+  const notes: string[] = [];
+  if (p?.audience) notes.push(`Customers are mostly: ${p.audience}.`);
+  if (p?.tone) notes.push(`Tone: ${p.tone.replace('_', ' ')}.`);
+  if (p?.language && p.language !== 'auto')
+    notes.push(`Prefer ${p.language} unless the customer writes otherwise.`);
+  return notes.length ? notes.join(' ') : null;
+}
+
 /**
  * Every automated reply goes through here: it builds the catalog context, asks
  * the AI service, refuses any price that is not in the catalog, remembers what
@@ -54,27 +73,21 @@ export class ReplyEngineService {
     private readonly leads: LeadsService,
   ) {}
 
-  async reply(req: ReplyRequest): Promise<ReplyOutcome | null> {
+  async reply(
+    req: ReplyRequest,
+    opts: { preview?: boolean } = {},
+  ): Promise<ReplyOutcome | null> {
+    const isPreview = Boolean(req.preview || opts.preview);
     const profile = await this.prisma.businessProfile.findUnique({
       where: { orgId: req.orgId },
-      select: {
-        activatedAt: true,
-        services: true,
-        businessName: true,
-        audience: true,
-        replyTone: true,
-        replyLanguage: true,
-      },
     });
-    // Nothing is sent until the seller has told us what the page is about and
-    // picked the automations they want. The message is still in the inbox.
-    const blocked = automationBlock(
+    const blocked = replyBlockedReason(
       profile,
       serviceFor(req.platform, req.eventType),
     );
-    if (blocked && !req.preview) {
+    if (blocked && !isPreview) {
       this.logger.log(
-        `No auto-reply for org ${req.orgId} (${req.platform} ${req.eventType}): ${blocked}`,
+        `No automated ${req.platform} ${req.eventType} reply for org ${req.orgId}: ${blocked}`,
       );
       return null;
     }
@@ -111,12 +124,16 @@ export class ReplyEngineService {
       ...(req.postId ? { post_context: { post_id: req.postId } } : {}),
       brand_persona: {
         brand_name: profile?.businessName || req.brandName,
-        ...(profile?.replyTone ? { tone: profile.replyTone } : {}),
-        ...(profile?.replyLanguage
-          ? { language_mode: profile.replyLanguage }
+        ...((profile?.tone || profile?.replyTone) &&
+        TONES.includes((profile?.tone || profile?.replyTone) as string)
+          ? { tone: (profile?.tone || profile?.replyTone) as string }
           : {}),
-        ...(profile?.audience
-          ? { custom_instructions: `Our customers: ${profile.audience}` }
+        ...((profile?.language || profile?.replyLanguage) &&
+        LANGUAGES.includes((profile?.language || profile?.replyLanguage) as string)
+          ? { language_mode: (profile?.language || profile?.replyLanguage) as string }
+          : {}),
+        ...(styleNotes(profile)
+          ? { custom_instructions: styleNotes(profile) as string }
           : {}),
       },
       business: ctx.business,

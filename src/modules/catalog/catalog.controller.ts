@@ -185,9 +185,8 @@ export class CatalogController {
       text: body?.text || '',
       senderId: 'preview',
       postId: body?.postId || null,
-      conversationId: null,
       preview: true,
-    });
+    }, { preview: true });
   }
 }
 

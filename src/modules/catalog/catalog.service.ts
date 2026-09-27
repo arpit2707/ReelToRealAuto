@@ -15,10 +15,14 @@ import {
 } from './industries';
 import { parseCsv } from './csv';
 import {
+  LANGUAGES,
   REPLY_LANGUAGES,
-  REPLY_TONES,
   SERVICES,
+  TONES,
+  REPLY_TONES,
   missingForActivation,
+  missingForOnboarding,
+  onboardingStatus,
 } from './onboarding';
 
 const SHOPIFY_API_VERSION = '2024-10';
@@ -64,9 +68,13 @@ export type ProfileInput = {
   autoTagPosts?: boolean;
   businessName?: string | null;
   audience?: string | null;
+  tone?: string | null;
   replyTone?: string | null;
+  language?: string | null;
   replyLanguage?: string | null;
   services?: string[];
+  // True finishes setup and switches the chosen automations on.
+  completeOnboarding?: boolean;
 };
 
 const OFFERING_INCLUDE = {
@@ -101,11 +109,9 @@ export class CatalogService {
         services: [],
         activatedAt: null,
       },
-      onboarding: {
-        active: Boolean(profile?.activatedAt),
-        missing: missingForActivation(profile),
-      },
+      onboarding: onboardingStatus(profile),
       template: industryOf(profile?.industry),
+      services: SERVICES,
       industries: Object.values(INDUSTRIES).map((i) => ({
         code: i.code,
         label: i.label,
@@ -118,22 +124,19 @@ export class CatalogService {
     if (input.industry && !INDUSTRIES[input.industry]) {
       throw new BadRequestException(`Unknown industry ${input.industry}`);
     }
-    if (input.replyTone && !REPLY_TONES.includes(input.replyTone as never)) {
-      throw new BadRequestException(`Unknown reply tone ${input.replyTone}`);
+    const tone = input.tone ?? input.replyTone;
+    if (tone && !TONES.includes(tone)) {
+      throw new BadRequestException(`Unknown tone ${tone}`);
     }
-    if (
-      input.replyLanguage &&
-      !REPLY_LANGUAGES.includes(input.replyLanguage as never)
-    ) {
-      throw new BadRequestException(
-        `Unknown reply language ${input.replyLanguage}`,
-      );
+    const language = input.language ?? input.replyLanguage;
+    if (language && !LANGUAGES.includes(language)) {
+      throw new BadRequestException(`Unknown language ${language}`);
     }
-    const badService = input.services?.find(
-      (s) => !SERVICES.includes(s as never),
+    const unknown = (input.services || []).filter(
+      (c) => !SERVICES.some((s) => s.code === c),
     );
-    if (badService) {
-      throw new BadRequestException(`Unknown service ${badService}`);
+    if (unknown.length) {
+      throw new BadRequestException(`Unknown service ${unknown.join(', ')}`);
     }
     const data = {
       industry: input.industry,
@@ -154,17 +157,42 @@ export class CatalogService {
         input.alertPhone === undefined
           ? undefined
           : normalizePhone(input.alertPhone),
-      autoTagPosts: input.autoTagPosts,
       businessName: input.businessName?.trim() ?? input.businessName,
       audience: input.audience,
-      replyTone: input.replyTone,
-      replyLanguage: input.replyLanguage,
+      tone: input.tone ?? input.replyTone,
+      replyTone: input.replyTone ?? input.tone,
+      language: input.language ?? input.replyLanguage,
+      replyLanguage: input.replyLanguage ?? input.language,
       services: input.services ? [...new Set(input.services)] : undefined,
     };
+    if (input.completeOnboarding) {
+      const existing = await this.prisma.businessProfile.findUnique({
+        where: { orgId },
+      });
+      const missing = missingForOnboarding({
+        industry: input.industry ?? existing?.industry,
+        description: input.description ?? existing?.description,
+      });
+      if (missing.length) {
+        throw new BadRequestException(
+          `Tell us more before switching on automation: ${missing.join(', ')}`,
+        );
+      }
+    }
+    const onboardedAt = input.completeOnboarding ? new Date() : undefined;
     await this.prisma.businessProfile.upsert({
       where: { orgId },
-      update: data,
-      create: { orgId, ...data, industry: input.industry || 'APPAREL' },
+      update: {
+        ...data,
+        ...(onboardedAt ? { onboardedAt, activatedAt: onboardedAt } : {}),
+      },
+      create: {
+        orgId,
+        ...data,
+        industry: input.industry || 'APPAREL',
+        onboardedAt,
+        activatedAt: onboardedAt,
+      },
     });
     return this.getProfile(orgId);
   }

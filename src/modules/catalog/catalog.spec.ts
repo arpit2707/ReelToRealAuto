@@ -114,6 +114,8 @@ describe('ReplyEngineService', () => {
   };
 
   const activeProfile = {
+    industry: 'BEAUTY_SERVICE',
+    onboardedAt: new Date('2026-09-01'),
     activatedAt: new Date('2026-09-01'),
     services: ['DM_REPLY', 'COMMENT_REPLY', 'WHATSAPP_REPLY'],
     businessName: 'Glam by Riya',
@@ -188,23 +190,38 @@ describe('ReplyEngineService', () => {
     expect(await engine.reply(req)).toBeNull();
   });
 
-  it('stays silent until the seller finishes onboarding', async () => {
-    const { engine } = make({ private_dm: 'hi' }, undefined, null);
+  it('stays silent until the seller finishes setup', async () => {
+    const ai = { private_dm: 'hi', public_reply: 'hi' };
+    const { engine } = make(ai, undefined, null);
     expect(await engine.reply(req)).toBeNull();
-    const inactive = make({ private_dm: 'hi' }, undefined, {
+    const pending = make(ai, undefined, {
       ...activeProfile,
+      onboardedAt: null,
       activatedAt: null,
+      services: ['COMMENT_REPLY'],
     });
-    expect(await inactive.engine.reply(req)).toBeNull();
+    expect(await pending.engine.reply(req)).toBeNull();
+    // A preview still shows what the AI would say.
+    expect(await engine.reply(req, { preview: true })).not.toBeNull();
   });
 
-  it('only runs the automations the seller picked', async () => {
-    const { engine } = make({ private_dm: 'hi', public_reply: 'ok' }, undefined, {
+  it('answers only the automations the seller switched on', async () => {
+    const ai = {
+      private_dm: 'Details DM me',
+      public_reply: 'DM check karo',
+      intent: 'x',
+      sentiment: 'neutral',
+      requires_human_attention: false,
+    };
+    const { engine } = make(ai, undefined, {
       ...activeProfile,
       services: ['DM_REPLY'],
     });
     expect(await engine.reply(req)).toBeNull();
     expect(await engine.reply({ ...req, eventType: 'dm' })).not.toBeNull();
+    expect(
+      await engine.reply({ ...req, platform: 'WHATSAPP', eventType: 'dm' }),
+    ).toBeNull();
   });
 
   it('lets the dashboard preview work before onboarding', async () => {
@@ -222,11 +239,9 @@ describe('ReplyEngineService', () => {
     });
     await engine.reply(req);
     const sent = (engine as any).aiClient.generateReply.mock.calls[0][0];
-    expect(sent.brand_persona).toEqual({
-      brand_name: 'Glam by Riya',
-      tone: 'formal',
-      custom_instructions: 'Our customers: Brides in Patna',
-    });
+    expect(sent.brand_persona.brand_name).toBe('Glam by Riya');
+    expect(sent.brand_persona.tone).toBe('formal');
+    expect(sent.brand_persona.custom_instructions).toContain('Brides in Patna');
   });
 
   it('creates a complete lead once every required detail is in', async () => {
