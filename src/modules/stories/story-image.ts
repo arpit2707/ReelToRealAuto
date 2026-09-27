@@ -14,6 +14,27 @@ export async function toStoryJpeg(image: Buffer): Promise<Buffer> {
     .toBuffer();
 }
 
+/**
+ * The seller's own photo as a 9:16 story without cutting it: the whole photo
+ * sits in the middle over a blurred, zoomed copy of itself.
+ */
+export async function toPaddedStoryJpeg(image: Buffer): Promise<Buffer> {
+  const background = await sharp(image)
+    .rotate()
+    .resize(STORY_WIDTH, STORY_HEIGHT, { fit: 'cover' })
+    .blur(40)
+    .modulate({ brightness: 0.8 })
+    .toBuffer();
+  const photo = await sharp(image)
+    .rotate()
+    .resize(STORY_WIDTH, STORY_HEIGHT, { fit: 'inside', withoutEnlargement: false })
+    .toBuffer();
+  return sharp(background)
+    .composite([{ input: photo, gravity: 'centre' }])
+    .jpeg({ quality: 88, mozjpeg: true })
+    .toBuffer();
+}
+
 export const FEED_WIDTH = 1080;
 export const FEED_HEIGHT = 1350;
 

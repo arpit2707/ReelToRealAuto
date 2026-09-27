@@ -8,6 +8,7 @@ describe('Gemini helpers', () => {
         idea: 'Idea',
         imagePrompt: 'p',
         seedKeyword: 'Diwali Sale',
+        offeringId: ' off1 ',
       },
       { title: 'Missing prompt', idea: 'x', seedKeyword: 'y' },
     ]);
@@ -19,6 +20,7 @@ describe('Gemini helpers', () => {
         caption: '',
         imagePrompt: 'p',
         seedKeyword: 'diwali sale',
+        offeringId: 'off1',
       },
     ]);
   });

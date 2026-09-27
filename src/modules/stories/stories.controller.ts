@@ -6,6 +6,7 @@ import {
   HttpCode,
   Logger,
   Param,
+  ParseIntPipe,
   Post,
   Put,
   Res,
@@ -95,12 +96,77 @@ export class StoriesController {
     return this.stories.listBatches(user.orgId);
   }
 
-  /** Generates today's ideas right away (replacing today's batch) so a merchant can try it. */
+  /** Scheduled posts, soonest first. */
+  @Get('upcoming')
+  @UseGuards(JwtAuthGuard)
+  upcoming(@CurrentUser() user: JwtPayload) {
+    return this.stories.listUpcoming(user.orgId);
+  }
+
+  @Post('batches/:id/options/:position/pick')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('OWNER', 'ADMIN')
+  pick(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Param('position', ParseIntPipe) position: number,
+    @Body() body: { when?: 'now' | 'tomorrow' | 'scheduled'; at?: string | null },
+  ) {
+    return this.stories.pickFromDashboard(user.orgId, id, position, body || {});
+  }
+
+  @Post('batches/:id/options/:position/edit')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('OWNER', 'ADMIN')
+  edit(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Param('position', ParseIntPipe) position: number,
+    @Body() body: { instruction?: string },
+  ) {
+    return this.stories.editFromDashboard(user.orgId, id, position, body?.instruction || '');
+  }
+
+  @Put('batches/:id/options/:position/caption')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('OWNER', 'ADMIN')
+  caption(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Param('position', ParseIntPipe) position: number,
+    @Body() body: { caption?: string | null },
+  ) {
+    return this.stories.setCaption(user.orgId, id, position, body?.caption ?? null);
+  }
+
+  @Post('batches/:id/cancel')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('OWNER', 'ADMIN')
+  cancel(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.stories.cancelFromDashboard(user.orgId, id);
+  }
+
+  /** The seller's own photo, posted as it is; `at` schedules it. */
+  @Post('own')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('OWNER', 'ADMIN')
+  own(
+    @CurrentUser() user: JwtPayload,
+    @Body() body: { image?: string; caption?: string | null; at?: string | null },
+  ) {
+    return this.stories.uploadOwnPost(user.orgId, body || {});
+  }
+
+  /**
+   * Generates today's ideas right away (replacing today's batch) so a merchant
+   * can try it. Refused when today's pick is scheduled or already posted.
+   */
   @Post('run-now')
   @HttpCode(202)
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('OWNER', 'ADMIN')
-  runNow(@CurrentUser() user: JwtPayload) {
+  async runNow(@CurrentUser() user: JwtPayload) {
+    await this.stories.assertCanRegenerate(user.orgId);
     setImmediate(() => {
       this.stories
         .generateBatch(user.orgId, { force: true })

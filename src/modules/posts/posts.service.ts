@@ -109,6 +109,53 @@ export class PostsService {
     }
   }
 
+  /** One post without its comments, for tagging a post the moment it is commented on. */
+  async getPost(
+    orgId: string,
+    channelId: string,
+    postId: string,
+  ): Promise<ChannelPost> {
+    const { channel, token } = await this.channelFor(orgId, channelId);
+    if (channel.platform === 'FACEBOOK') {
+      const p = await this.graphGet(
+        `/${postId}`,
+        { fields: 'id,message,story,created_time,full_picture,permalink_url' },
+        token,
+      );
+      return {
+        id: String(p.id),
+        text: p.message || p.story || '',
+        mediaUrl: p.full_picture || null,
+        mediaType: p.full_picture ? 'IMAGE' : null,
+        permalink: p.permalink_url || null,
+        createdAt: p.created_time || null,
+        likes: null,
+        commentsCount: null,
+        comments: [],
+      };
+    }
+    const m = await this.graphGet(
+      `/${postId}`,
+      {
+        fields:
+          'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count',
+      },
+      token,
+    );
+    return {
+      id: String(m.id),
+      text: m.caption || '',
+      mediaUrl:
+        m.media_type === 'VIDEO' ? m.thumbnail_url || null : m.media_url || null,
+      mediaType: m.media_type || null,
+      permalink: m.permalink || null,
+      createdAt: m.timestamp || null,
+      likes: m.like_count ?? null,
+      commentsCount: m.comments_count ?? null,
+      comments: [],
+    };
+  }
+
   private async facebookPosts(
     pageId: string,
     token: string,

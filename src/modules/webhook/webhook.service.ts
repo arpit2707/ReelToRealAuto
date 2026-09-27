@@ -222,6 +222,7 @@ export class WebhookService {
             senderId: fromWaId,
             senderName: msg.profile?.name || change.value.contacts?.[0]?.profile?.name || null,
             conversationId: conversation.id,
+            channelId: channel.id,
           });
           if (!aiResponse) continue;
 
@@ -348,6 +349,7 @@ export class WebhookService {
             senderId: senderId || 'anonymous',
             senderName: commentVal.from?.name || null,
             postId: commentVal.post_id || null,
+            channelId: channel.id,
           });
           if (!aiResponse) continue;
 
@@ -412,6 +414,7 @@ export class WebhookService {
           text,
           senderId,
           conversationId: conversation.id,
+          channelId: channel.id,
         });
         if (!aiResponse) continue;
 
@@ -488,6 +491,7 @@ export class WebhookService {
             decryptedToken,
             channel.orgId,
             entryId,
+            channel.id,
           );
         }
       }
@@ -507,6 +511,7 @@ export class WebhookService {
     accessToken: string,
     orgId: string,
     igAccountId: string,
+    channelId?: string,
   ) {
     const commentId = commentData.id;
     const text = commentData.text;
@@ -531,6 +536,7 @@ export class WebhookService {
       senderId: senderId || 'anonymous',
       senderName: commentData.from?.username || null,
       postId: mediaId || null,
+      channelId: channelId || null,
     });
     if (!aiResponse) return;
 
@@ -605,6 +611,7 @@ export class WebhookService {
       // A reply to a story or post carries the media it was about.
       postId: messageData.message?.reply_to?.story?.id || messageData.message?.referral?.ads_context_data?.post_id || null,
       conversationId: conversation.id,
+      channelId,
     });
     if (!aiResponse) return;
 

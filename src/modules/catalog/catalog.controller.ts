@@ -15,6 +15,7 @@ import type { JwtPayload } from '../auth/jwt';
 import {
   CatalogService,
   type OfferingInput,
+  type PageProfileInput,
   type ProfileInput,
 } from './catalog.service';
 import { PostTaggingService } from './post-tagging.service';
@@ -165,6 +166,38 @@ export class CatalogController {
     return this.tagging.setStatus(user.orgId, id, body?.status);
   }
 
+  @Put('posts/:postId/note')
+  @Roles('OWNER', 'ADMIN')
+  setPostNote(
+    @CurrentUser() user: JwtPayload,
+    @Param('postId') postId: string,
+    @Body()
+    body: {
+      note?: string | null;
+      platform?: string;
+      caption?: string | null;
+      mediaUrl?: string | null;
+      permalink?: string | null;
+    },
+  ) {
+    return this.tagging.setNote(user.orgId, postId, body || {});
+  }
+
+  @Get('pages')
+  pages(@CurrentUser() user: JwtPayload) {
+    return this.catalog.listPageProfiles(user.orgId);
+  }
+
+  @Put('pages/:channelId')
+  @Roles('OWNER', 'ADMIN')
+  savePage(
+    @CurrentUser() user: JwtPayload,
+    @Param('channelId') channelId: string,
+    @Body() body: PageProfileInput,
+  ) {
+    return this.catalog.savePageProfile(user.orgId, channelId, body || {});
+  }
+
   @Get('ad-picks')
   adPicks(@CurrentUser() user: JwtPayload) {
     return this.tagging.adPicks(user.orgId);
@@ -175,7 +208,12 @@ export class CatalogController {
   preview(
     @CurrentUser() user: JwtPayload,
     @Body()
-    body: { text: string; postId?: string; eventType?: 'comment' | 'dm' },
+    body: {
+      text: string;
+      postId?: string;
+      channelId?: string;
+      eventType?: 'comment' | 'dm';
+    },
   ) {
     return this.engine.reply({
       orgId: user.orgId,
@@ -185,6 +223,7 @@ export class CatalogController {
       text: body?.text || '',
       senderId: 'preview',
       postId: body?.postId || null,
+      channelId: body?.channelId || null,
       preview: true,
     }, { preview: true });
   }

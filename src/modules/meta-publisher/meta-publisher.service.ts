@@ -484,6 +484,29 @@ export class MetaPublisherService {
     return String(json.post_id || json.id);
   }
 
+  /**
+   * Downloads a photo someone sent to our WhatsApp number: the media id gives a
+   * short-lived URL, which also needs the token.
+   */
+  async downloadWhatsAppMedia(
+    mediaId: string,
+    accessToken: string,
+    maxBytes = 16 * 1024 * 1024,
+  ): Promise<{ data: Buffer; mimeType: string }> {
+    const auth = { Authorization: `Bearer ${accessToken}` };
+    const meta = await this.graphJson(
+      await fetch(graphUrl(`/${mediaId}`), { headers: auth }),
+      'media lookup',
+      'WhatsApp',
+    );
+    if (!meta?.url) throw new Error('WhatsApp media lookup failed: no URL');
+    const res = await fetch(String(meta.url), { headers: auth });
+    if (!res.ok) throw new Error(`WhatsApp media download failed: HTTP ${res.status}`);
+    const data = Buffer.from(await res.arrayBuffer());
+    if (data.length > maxBytes) throw new Error('WhatsApp media is too large');
+    return { data, mimeType: String(meta.mime_type || res.headers.get('content-type') || 'image/jpeg') };
+  }
+
   /** An image with up to three reply buttons under it (only inside the 24h window). */
   async sendWhatsAppImageButtons(
     phoneNumberId: string,

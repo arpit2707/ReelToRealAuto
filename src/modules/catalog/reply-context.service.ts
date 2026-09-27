@@ -57,6 +57,15 @@ export type ReplyContext = {
     rules: string[];
   };
   offerings: ContextOffering[];
+  // The post the customer commented on or replied to: its caption and the
+  // seller's note about it. Null for plain DMs.
+  post: { post_id: string; caption: string | null; note: string | null } | null;
+  // Style for this page: the page's own settings, else the business profile's.
+  style: {
+    audience: string | null;
+    tone: string | null;
+    language: string | null;
+  };
   goal_state: GoalState;
   recent_messages: Array<{ from: 'customer' | 'business'; text: string }>;
   template: IndustryTemplate;
@@ -90,8 +99,10 @@ export class ReplyContextService {
     text: string;
     postId?: string | null;
     conversationId?: string | null;
+    // The Instagram account / Facebook Page the message came in on.
+    channelId?: string | null;
   }): Promise<ReplyContext> {
-    const [profile, conversation] = await Promise.all([
+    const [profile, conversation, page, social, link] = await Promise.all([
       this.prisma.businessProfile.findUnique({ where: { orgId: input.orgId } }),
       input.conversationId
         ? this.prisma.conversation.findUnique({
@@ -99,16 +110,45 @@ export class ReplyContextService {
             select: { goalState: true },
           })
         : null,
+      input.channelId
+        ? this.prisma.pageProfile.findFirst({
+            where: { channelId: input.channelId, orgId: input.orgId },
+          })
+        : null,
+      input.postId
+        ? this.prisma.socialPost.findUnique({
+            where: {
+              orgId_postId: { orgId: input.orgId, postId: input.postId },
+            },
+            select: { caption: true, note: true },
+          })
+        : null,
+      input.postId
+        ? this.prisma.postOfferingLink.findFirst({
+            where: { orgId: input.orgId, postId: input.postId, caption: { not: null } },
+            select: { caption: true },
+          })
+        : null,
     ]);
     const template = industryOf(profile?.industry);
     const goalState = ((conversation?.goalState as GoalState | null) ||
       {}) as GoalState;
+    // A page limited to some catalog items only suggests those, unless the
+    // seller tagged the post with something else.
+    const pageItems = page?.offeringIds?.length ? page.offeringIds : null;
 
     const linkedIds = input.postId
       ? await this.linkedOfferingIds(input.orgId, input.postId)
       : [];
-    const rememberedIds = goalState.offeringIds || [];
-    const searched = await this.search(input.orgId, input.text, MAX_OFFERINGS);
+    const rememberedIds = (goalState.offeringIds || []).filter(
+      (id) => !pageItems || pageItems.includes(id),
+    );
+    const searched = await this.search(
+      input.orgId,
+      input.text,
+      MAX_OFFERINGS,
+      pageItems,
+    );
 
     const orderedIds = [
       ...new Set([
@@ -182,18 +222,20 @@ export class ReplyContextService {
       for (const v of o.variants) if (v.price != null) allowed.add(v.price);
     }
 
+    const caption = social?.caption || link?.caption || null;
     return {
       business: {
         industry: template.code,
         industry_label: template.label,
-        description: profile?.description || null,
+        description: page?.description || profile?.description || null,
         city: profile?.city || null,
         service_areas: profile?.serviceAreas || [],
         hours: profile?.hours || null,
         policies: (profile?.policies as Record<string, string> | null) || null,
-        faqs: (
-          (profile?.faqs as Array<{ q: string; a: string }> | null) || []
-        ).slice(0, 12),
+        faqs: [
+          ...((page?.faqs as Array<{ q: string; a: string }> | null) || []),
+          ...((profile?.faqs as Array<{ q: string; a: string }> | null) || []),
+        ].slice(0, 12),
       },
       playbook: {
         goal: template.goal,
@@ -201,6 +243,20 @@ export class ReplyContextService {
         rules: template.rules,
       },
       offerings,
+      post:
+        input.postId && (caption || social?.note)
+          ? {
+              post_id: input.postId,
+              caption: caption ? caption.slice(0, 1000) : null,
+              note: social?.note || null,
+            }
+          : null,
+      style: {
+        audience: page?.audience || profile?.audience || null,
+        tone: page?.tone || profile?.tone || profile?.replyTone || null,
+        language:
+          page?.language || profile?.language || profile?.replyLanguage || null,
+      },
       goal_state: goalState,
       recent_messages: recent.reverse().map((m) => ({
         from:
@@ -239,11 +295,20 @@ export class ReplyContextService {
    * labels. Catalogs here are tens to a few hundred items per seller, so this
    * runs in memory; it returns nothing rather than a weak guess.
    */
-  async search(orgId: string, text: string, limit = MAX_OFFERINGS) {
+  async search(
+    orgId: string,
+    text: string,
+    limit = MAX_OFFERINGS,
+    onlyIds?: string[] | null,
+  ) {
     const q = tokens(text);
     if (!q.length) return [];
     const rows = await this.prisma.offering.findMany({
-      where: { orgId, isActive: true },
+      where: {
+        orgId,
+        isActive: true,
+        ...(onlyIds?.length ? { id: { in: onlyIds } } : {}),
+      },
       select: {
         id: true,
         title: true,

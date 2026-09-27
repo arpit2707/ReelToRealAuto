@@ -9,6 +9,8 @@ export interface GenerateReplyPayload {
   post_context?: {
     post_id: string;
     caption?: string;
+    // The seller's own note about the post ("offer till Sunday").
+    note?: string;
     tagged_product_sku?: string;
   };
   brand_persona?: {

@@ -77,6 +77,16 @@ export type ProfileInput = {
   completeOnboarding?: boolean;
 };
 
+// Per-page overrides; empty values fall back to the business profile.
+export type PageProfileInput = {
+  description?: string | null;
+  audience?: string | null;
+  tone?: string | null;
+  language?: string | null;
+  faqs?: Array<{ q: string; a: string }> | null;
+  offeringIds?: string[];
+};
+
 const OFFERING_INCLUDE = {
   variants: { orderBy: { position: 'asc' as const } },
   components: { include: { item: { select: { id: true, title: true } } } },
@@ -224,6 +234,84 @@ export class CatalogService {
       data: { activatedAt: null },
     });
     return this.getProfile(orgId);
+  }
+
+  // ---------------------------------------------------------- page profiles
+
+  /** Every Instagram account and Facebook Page, with its overrides (if any). */
+  async listPageProfiles(orgId: string) {
+    const channels = await this.prisma.channel.findMany({
+      where: {
+        orgId,
+        platform: { in: ['INSTAGRAM', 'FACEBOOK'] },
+        status: { not: 'DISCONNECTED' },
+      },
+      select: {
+        id: true,
+        platform: true,
+        name: true,
+        handle: true,
+        pageProfile: true,
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    return channels.map(({ pageProfile, ...c }) => ({
+      channel: c,
+      profile: pageProfile,
+    }));
+  }
+
+  async savePageProfile(
+    orgId: string,
+    channelId: string,
+    input: PageProfileInput,
+  ) {
+    const channel = await this.prisma.channel.findFirst({
+      where: { id: channelId, orgId, platform: { in: ['INSTAGRAM', 'FACEBOOK'] } },
+      select: { id: true },
+    });
+    if (!channel) throw new NotFoundException('Page not found');
+    const tone = input.tone?.trim() || null;
+    if (tone && !TONES.includes(tone)) {
+      throw new BadRequestException(`Unknown tone ${tone}`);
+    }
+    const language = input.language?.trim() || null;
+    if (language && !LANGUAGES.includes(language)) {
+      throw new BadRequestException(`Unknown language ${language}`);
+    }
+    const offeringIds = [...new Set(input.offeringIds || [])];
+    if (offeringIds.length) {
+      const found = await this.prisma.offering.count({
+        where: { id: { in: offeringIds }, orgId },
+      });
+      if (found !== offeringIds.length) {
+        throw new BadRequestException('Some items are not in your catalog');
+      }
+    }
+    const faqs = (input.faqs || [])
+      .filter((f) => f?.q?.trim() && f?.a?.trim())
+      .map((f) => ({ q: f.q.trim().slice(0, 200), a: f.a.trim().slice(0, 500) }))
+      .slice(0, 20);
+    const data = {
+      description: input.description?.trim().slice(0, 1000) || null,
+      audience: input.audience?.trim().slice(0, 300) || null,
+      tone,
+      language,
+      faqs: faqs.length ? (faqs as Prisma.InputJsonValue) : Prisma.DbNull,
+      offeringIds,
+    };
+    const empty =
+      !data.description && !data.audience && !tone && !language && !faqs.length && !offeringIds.length;
+    if (empty) {
+      // Nothing overridden: the page simply follows the business profile again.
+      await this.prisma.pageProfile.deleteMany({ where: { channelId, orgId } });
+      return null;
+    }
+    return this.prisma.pageProfile.upsert({
+      where: { channelId },
+      create: { orgId, channelId, ...data },
+      update: data,
+    });
   }
 
   // -------------------------------------------------------------- offerings

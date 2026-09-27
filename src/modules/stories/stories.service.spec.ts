@@ -1,9 +1,12 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import {
+  decodeImage,
   localDate,
   localTime,
+  nextDate,
   normalizeTime,
   normalizeWhatsAppNumber,
+  parseScheduleTime,
   StoriesService,
   zonedDateTime,
 } from './stories.service';
@@ -11,6 +14,7 @@ import {
 jest.mock('./story-image', () => ({
   toStoryJpeg: jest.fn(async (b: Buffer) => Buffer.concat([Buffer.from('jpg:'), b])),
   toFeedJpeg: jest.fn(async (b: Buffer) => Buffer.concat([Buffer.from('feed:'), b])),
+  toPaddedStoryJpeg: jest.fn(async (b: Buffer) => Buffer.concat([Buffer.from('padded:'), b])),
   overlayText: jest.fn(async () => Buffer.from('overlay')),
 }));
 
@@ -66,6 +70,9 @@ function makeService(settingsOver: any = {}) {
       findFirst: jest.fn(async ({ where }) => channels[where.platform] ?? null),
     },
     offering: { findMany: jest.fn().mockResolvedValue([]) },
+    pageProfile: { findFirst: jest.fn().mockResolvedValue(null) },
+    socialPost: { upsert: jest.fn().mockResolvedValue({}) },
+    postOfferingLink: { upsert: jest.fn().mockResolvedValue({}) },
     storyBatch: {
       findUnique: jest.fn(),
       findFirst: jest.fn(),
@@ -95,6 +102,8 @@ function makeService(settingsOver: any = {}) {
     sendWhatsAppImage: jest.fn().mockResolvedValue(true),
     sendWhatsAppImageButtons: jest.fn().mockResolvedValue(true),
     sendWhatsAppMessage: jest.fn().mockResolvedValue(true),
+    sendInteractiveButtonMessage: jest.fn().mockResolvedValue(false),
+    downloadWhatsAppMedia: jest.fn().mockResolvedValue({ data: Buffer.from('photo'), mimeType: 'image/jpeg' }),
     publishInstagramStory: jest.fn().mockResolvedValue('story99'),
     publishInstagramFeed: jest.fn().mockResolvedValue('feed99'),
     publishFacebookPhoto: jest.fn().mockResolvedValue('fb99'),
@@ -115,6 +124,12 @@ function makeService(settingsOver: any = {}) {
     generateImage: jest.fn().mockResolvedValue(Buffer.from('png')),
     editImage: jest.fn().mockResolvedValue(Buffer.from('edited')),
     addTextToImage: jest.fn().mockResolvedValue(Buffer.from('lettered')),
+    describeOwnPhoto: jest.fn().mockResolvedValue({
+      title: 'New lehenga',
+      caption: 'Naya lehenga aa gaya!',
+      seedKeyword: 'bridal lehenga',
+      offeringId: 'off1',
+    }),
   };
   const keywords: any = {
     apifyHashtags: jest.fn().mockResolvedValue(['#weddingseason', '#bridalmakeup']),
@@ -194,7 +209,7 @@ describe('StoriesService', () => {
 
     it('keeps an existing batch for today', async () => {
       const { service, prisma, gemini } = makeService();
-      prisma.storyBatch.findUnique.mockResolvedValue({
+      prisma.storyBatch.findFirst.mockResolvedValue({
         id: 'old',
         status: 'NOTIFIED',
       });
@@ -235,8 +250,8 @@ describe('StoriesService', () => {
         { orgId: 'late', sendTime: '11:00', org: { timezone: 'Asia/Kolkata' } },
         { orgId: 'done', sendTime: '08:00', org: { timezone: 'Asia/Kolkata' } },
       ]);
-      prisma.storyBatch.findUnique.mockImplementation(async ({ where }: any) =>
-        where.orgId_forDate?.orgId === 'done' ? { id: 'x' } : null,
+      prisma.storyBatch.findFirst.mockImplementation(async ({ where }: any) =>
+        where.orgId === 'done' && where.kind === 'DAILY' ? { id: 'x' } : null,
       );
       const generate = jest.spyOn(service, 'generateBatch').mockResolvedValue({} as any);
 
@@ -355,14 +370,82 @@ describe('StoriesService', () => {
       expect(meta.sendWhatsAppMessage.mock.calls[0][2]).toContain('19:00 baje Instagram story');
     });
 
-    it('publishes at once when the posting time has already passed', async () => {
-      const { service, prisma } = makeService();
+    it('asks "now or tomorrow" instead of posting when the posting time has passed', async () => {
+      const { service, prisma, meta } = makeService();
       prisma.storyBatch.findUnique.mockResolvedValue(openBatch());
+      meta.sendInteractiveButtonMessage.mockResolvedValue(true);
       const publish = jest.spyOn(service, 'publishBatch').mockResolvedValue(true);
 
       await service.pick('b1', 2, MERCHANT, NIGHT);
 
+      expect(publish).not.toHaveBeenCalled();
+      expect(prisma.storyBatch.updateMany).not.toHaveBeenCalled();
+      const buttons = meta.sendInteractiveButtonMessage.mock.calls[0][5];
+      expect(buttons).toEqual([
+        { id: 'STORY_NOW_b1_2', title: 'Abhi post karo' },
+        { id: 'STORY_TMRW_b1_2', title: 'Kal 19:00 baje' },
+      ]);
+    });
+
+    it('"Abhi post karo" publishes right away', async () => {
+      const { service, prisma } = makeService();
+      prisma.storyBatch.findUnique.mockResolvedValue(openBatch());
+      const publish = jest.spyOn(service, 'publishBatch').mockResolvedValue(true);
+
+      await service.handleWhatsAppReply({ from: MERCHANT, interactive: { button_reply: { id: 'STORY_NOW_b1_2' } } });
+
+      expect(prisma.storyBatch.updateMany.mock.calls[0][0].data).toMatchObject({ selectedOptionId: 'o2' });
+      expect(prisma.storyBatch.updateMany.mock.calls[0][0].data.status).toBeUndefined();
       expect(publish).toHaveBeenCalledWith('b1');
+    });
+
+    it('"Kal" schedules for tomorrow\'s posting time', async () => {
+      const { service, prisma, meta } = makeService();
+      prisma.storyBatch.findUnique.mockResolvedValue(openBatch());
+
+      await service.pick('b1', 2, MERCHANT, NIGHT, 'tomorrow');
+
+      expect(prisma.storyBatch.updateMany.mock.calls[0][0].data).toMatchObject({
+        status: 'SCHEDULED',
+        scheduledFor: new Date('2026-09-29T13:30:00Z'),
+      });
+      expect(meta.sendWhatsAppMessage.mock.calls[0][2]).toContain('kal 19:00 baje');
+    });
+
+    it('confirms a schedule with a Cancel button, and Cancel takes it off the calendar', async () => {
+      const { service, prisma, meta } = makeService();
+      prisma.storyBatch.findUnique.mockResolvedValue(openBatch());
+      meta.sendInteractiveButtonMessage.mockResolvedValue(true);
+
+      await service.pick('b1', 2, MERCHANT, MORNING);
+      expect(meta.sendInteractiveButtonMessage.mock.calls[0][5]).toEqual([{ id: 'STORY_CANCEL_b1', title: 'Cancel' }]);
+
+      prisma.storyBatch.findUnique.mockResolvedValue({ waRecipient: MERCHANT, status: 'SCHEDULED' });
+      prisma.storyBatch.updateMany.mockClear();
+      await service.handleWhatsAppReply({ from: MERCHANT, interactive: { button_reply: { id: 'STORY_CANCEL_b1' } } });
+      expect(prisma.storyBatch.updateMany).toHaveBeenCalledWith({
+        where: { id: 'b1', status: 'SCHEDULED' },
+        data: { status: 'AWAITING_PICK', selectedOptionId: null, scheduledFor: null },
+      });
+      expect(meta.sendWhatsAppMessage.mock.calls.at(-1)[2]).toContain('cancel ho gaya');
+    });
+
+    it('"caption: ..." changes only the caption', async () => {
+      const { service, prisma, gemini, meta } = makeService();
+      prisma.storyOption.update.mockResolvedValue({
+        id: 'o2',
+        position: 2,
+        title: 'T2',
+        label: 'L2',
+        idea: 'I2',
+        caption: 'Aaj book karo',
+      });
+
+      await service.applyEdit('b1', 'o2', 'Caption: Aaj book karo', MERCHANT);
+
+      expect(gemini.editImage).not.toHaveBeenCalled();
+      expect(prisma.storyOption.update).toHaveBeenCalledWith({ where: { id: 'o2' }, data: { caption: 'Aaj book karo' } });
+      expect(meta.sendWhatsAppImageButtons.mock.calls[0][3]).toContain('Caption: Aaj book karo');
     });
 
     it('tells the merchant when the post already went out', async () => {
@@ -583,6 +666,286 @@ describe('StoriesService', () => {
       );
       await expect(service.updateSettings('org1', { destinations: [] })).rejects.toBeInstanceOf(BadRequestException);
     });
+  });
+});
+
+describe('StoriesService (scheduling and own posts)', () => {
+  beforeEach(() => {
+    process.env.STORY_WA_PHONE_NUMBER_ID = 'platform-phone';
+    process.env.STORY_WA_ACCESS_TOKEN = 'platform-token';
+    process.env.STORY_MEDIA_SECRET = 'media-secret';
+  });
+  afterEach(() => {
+    for (const k of ['STORY_WA_PHONE_NUMBER_ID', 'STORY_WA_ACCESS_TOKEN', 'STORY_MEDIA_SECRET']) {
+      delete process.env[k];
+    }
+  });
+
+  it('"Send ideas now" never replaces a scheduled or published post', async () => {
+    for (const status of ['SCHEDULED', 'PUBLISHED', 'PUBLISHING', 'GENERATING']) {
+      const { service, prisma, gemini } = makeService();
+      prisma.storyBatch.findFirst.mockResolvedValue({ id: 'old', status });
+      await expect(service.assertCanRegenerate('org1')).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.generateBatch('org1', { force: true })).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.storyBatch.delete).not.toHaveBeenCalled();
+      expect(gemini.generateIdeas).not.toHaveBeenCalled();
+    }
+    const { service, prisma } = makeService();
+    prisma.storyBatch.findFirst.mockResolvedValue({ id: 'old', status: 'AWAITING_PICK' });
+    await expect(service.assertCanRegenerate('org1')).resolves.toBeUndefined();
+  });
+
+  it('keeps the catalog item an idea promotes, but only a real one', async () => {
+    const { service, prisma, gemini } = makeService();
+    prisma.offering.findMany.mockResolvedValue([{ id: 'off1', title: 'Bridal HD', priceMin: 18000, currency: 'INR' }]);
+    gemini.generateIdeas.mockImplementation(async (_ctx: any, count: number) =>
+      Array.from({ length: count }, (_, i) => ({
+        title: `T${i}`,
+        label: 'L',
+        idea: 'I',
+        caption: 'C',
+        imagePrompt: 'P',
+        seedKeyword: 's',
+        offeringId: i === 0 ? 'off1' : 'made-up',
+      })),
+    );
+    await service.generateBatch('org1');
+    const created = prisma.storyOption.create.mock.calls.map((c: any) => c[0].data.offeringId);
+    expect(created[0]).toBe('off1');
+    expect(created.slice(1).every((id: any) => id === null)).toBe(true);
+    expect(gemini.generateIdeas.mock.calls[0][0].products[0].id).toBe('off1');
+  });
+
+  it('writes ideas in the tone and for the audience from business setup', async () => {
+    const { service, prisma, gemini } = makeService();
+    prisma.businessProfile.findUnique.mockResolvedValue({
+      industry: 'BRIDAL_MAKEUP',
+      description: 'Bridal makeup in Patna',
+      tone: 'playful',
+      language: 'hinglish',
+      audience: 'Brides in Bihar',
+    });
+    await service.generateBatch('org1');
+    expect(gemini.generateIdeas.mock.calls[0][0].persona).toEqual({
+      tone: 'playful',
+      language: 'hinglish',
+      audience: 'Brides in Bihar',
+    });
+    expect(gemini.generateIdeas.mock.calls[0][0].description).toBe('Bridal makeup in Patna');
+  });
+
+  describe('reminders', () => {
+    const batch = (over: any = {}) => ({
+      id: 'b1',
+      forDate: '2026-09-28',
+      status: 'AWAITING_PICK',
+      waRecipient: MERCHANT,
+      org: { name: 'Glow Bride', timezone: 'Asia/Kolkata', storySettings: { postTime: '19:00' } },
+      ...over,
+    });
+
+    it('nudges once, two hours before the posting time', async () => {
+      const { service, prisma, meta } = makeService();
+      prisma.storyBatch.findMany.mockResolvedValue([batch()]);
+      // 17:30 IST: inside the window.
+      expect(await service.remindUnpicked(new Date('2026-09-28T12:00:00Z'))).toBe(1);
+      expect(prisma.storyBatch.updateMany).toHaveBeenCalledWith({
+        where: { id: 'b1', reminderSentAt: null },
+        data: { reminderSentAt: expect.any(Date) },
+      });
+      expect(meta.sendWhatsAppMessage.mock.calls[0][2]).toContain('abhi chuni nahi gayi');
+
+      // Too early, and after the posting time: nothing.
+      meta.sendWhatsAppMessage.mockClear();
+      expect(await service.remindUnpicked(new Date('2026-09-28T10:00:00Z'))).toBe(0);
+      expect(await service.remindUnpicked(new Date('2026-09-28T14:00:00Z'))).toBe(0);
+      expect(meta.sendWhatsAppMessage).not.toHaveBeenCalled();
+    });
+
+    it('uses the template when the seller never opened the ideas', async () => {
+      const { service, prisma, meta } = makeService();
+      prisma.storyBatch.findMany.mockResolvedValue([batch({ status: 'NOTIFIED' })]);
+      await service.remindUnpicked(new Date('2026-09-28T12:00:00Z'));
+      expect(meta.sendWhatsAppMessage).not.toHaveBeenCalled();
+      expect(meta.sendWhatsAppTemplate.mock.calls[0][4][1].parameters[0].payload).toBe('STORY_SHOW_b1');
+    });
+
+    it('does not remind twice when another tick claimed it', async () => {
+      const { service, prisma, meta } = makeService();
+      prisma.storyBatch.findMany.mockResolvedValue([batch()]);
+      prisma.storyBatch.updateMany.mockResolvedValue({ count: 0 });
+      expect(await service.remindUnpicked(new Date('2026-09-28T12:00:00Z'))).toBe(0);
+      expect(meta.sendWhatsAppMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the seller's own photo", () => {
+    it('recognises a photo only from a seller number', async () => {
+      const { service, prisma } = makeService();
+      prisma.storySettings.findFirst = jest.fn().mockResolvedValue({ orgId: 'org1' });
+      const photo = { from: MERCHANT, type: 'image', image: { id: 'media1' } };
+      expect(await service.isStoryReply(photo, 'platform-phone')).toBe(true);
+      expect(await service.isStoryReply(photo, 'some-merchant-number')).toBe(false);
+      prisma.storySettings.findFirst.mockResolvedValue(null);
+      expect(await service.isStoryReply(photo, 'platform-phone')).toBe(false);
+    });
+
+    it('turns a WhatsApp photo into a post with Post this / Edit', async () => {
+      const { service, prisma, meta, gemini } = makeService();
+      prisma.storySettings.findFirst = jest.fn().mockResolvedValue({ orgId: 'org1' });
+      prisma.storyOption.create.mockImplementation(async ({ data }: any) => ({ id: 'own1', ...data }));
+      prisma.offering.findMany.mockResolvedValue([{ id: 'off1', title: 'Red lehenga' }]);
+
+      await service.handleWhatsAppReply({
+        from: MERCHANT,
+        type: 'image',
+        image: { id: 'media1', caption: 'Naya lehenga aa gaya!' },
+      });
+
+      expect(meta.downloadWhatsAppMedia).toHaveBeenCalledWith('media1', 'platform-token');
+      expect(gemini.describeOwnPhoto.mock.calls[0][1].sellerCaption).toBe('Naya lehenga aa gaya!');
+      expect(prisma.storyBatch.create.mock.calls[0][0].data).toMatchObject({
+        kind: 'OWN',
+        status: 'AWAITING_PICK',
+        waRecipient: MERCHANT,
+      });
+      const option = prisma.storyOption.create.mock.calls[0][0].data;
+      expect(option).toMatchObject({ source: 'OWN', offeringId: 'off1', caption: 'Naya lehenga aa gaya!' });
+      expect(Buffer.from(option.imageData).toString()).toBe('padded:photo');
+      expect(meta.sendWhatsAppImageButtons.mock.calls[0][4][0].id).toBe('STORY_POST_b1_1');
+    });
+
+    it('schedules an uploaded photo straight away', async () => {
+      const { service, prisma } = makeService();
+      prisma.storyOption.create.mockImplementation(async ({ data }: any) => ({ id: 'own1', ...data }));
+      const at = '2026-09-30T13:30:00.000Z';
+      await service.uploadOwnPost(
+        'org1',
+        { image: `data:image/jpeg;base64,${Buffer.from('photo').toString('base64')}`, at },
+        MORNING,
+      );
+      expect(prisma.storyBatch.create.mock.calls[0][0].data.forDate).toBe('2026-09-30');
+      expect(prisma.storyBatch.updateMany.mock.calls[0][0].data).toMatchObject({
+        status: 'SCHEDULED',
+        selectedOptionId: 'own1',
+        scheduledFor: new Date(at),
+      });
+    });
+
+    it('posts the seller photo without AI lettering', async () => {
+      const { service, prisma, gemini } = makeService();
+      prisma.storyOption.findUnique.mockResolvedValue({
+        id: 'own1',
+        title: 'New lehenga',
+        caption: 'Naya lehenga',
+        seedKeyword: 'bridal lehenga',
+        source: 'OWN',
+        offeringId: null,
+        imageData: Buffer.from('padded'),
+        batch: { trendKeywords: [] },
+      });
+      await service.publishOption('org1', 'own1');
+      expect(gemini.addTextToImage).not.toHaveBeenCalled();
+      expect(Buffer.from(prisma.storyOption.update.mock.calls[0][0].data.finalImageData).toString()).toBe('padded');
+    });
+  });
+
+  it('remembers each published post and its item for the comment replies', async () => {
+    const { service, prisma } = makeService({ destinations: ['IG_FEED', 'FB_FEED'] });
+    prisma.storyOption.findUnique.mockResolvedValue({
+      id: 'o2',
+      title: 'Bridal glow',
+      caption: 'Book now',
+      seedKeyword: 'hd bridal makeup',
+      source: 'AI',
+      offeringId: 'off1',
+      imageData: Buffer.from('draft'),
+      batch: { trendKeywords: [] },
+    });
+    await service.publishOption('org1', 'o2');
+    const saved = prisma.socialPost.upsert.mock.calls.map((c: any) => c[0].create);
+    expect(saved.map((s: any) => [s.postId, s.platform, s.source])).toEqual([
+      ['feed99', 'INSTAGRAM', 'DAILY_POST'],
+      ['fb99', 'FACEBOOK', 'DAILY_POST'],
+    ]);
+    expect(saved[0].caption).toContain('Book now');
+    expect(prisma.postOfferingLink.upsert.mock.calls[0][0].create).toMatchObject({
+      postId: 'feed99',
+      offeringId: 'off1',
+      status: 'SELLER_CONFIRMED',
+    });
+  });
+
+  describe('dashboard', () => {
+    const dashBatch = (over: any = {}) => ({
+      id: 'b1',
+      orgId: 'org1',
+      forDate: '2026-09-28',
+      status: 'AWAITING_PICK',
+      options: [{ id: 'o2', imageData: Buffer.from('draft') }],
+      ...over,
+    });
+
+    it('schedules for the posting time, or says the time has passed', async () => {
+      const { service, prisma } = makeService();
+      prisma.storyBatch.findFirst.mockResolvedValue(dashBatch());
+      await expect(service.pickFromDashboard('org1', 'b1', 2, {}, MORNING)).resolves.toEqual({
+        status: 'SCHEDULED',
+        scheduledFor: new Date('2026-09-28T13:30:00Z'),
+      });
+      await expect(service.pickFromDashboard('org1', 'b1', 2, {}, NIGHT)).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.pickFromDashboard('org1', 'b1', 2, { when: 'tomorrow' }, NIGHT)).resolves.toEqual({
+        status: 'SCHEDULED',
+        scheduledFor: new Date('2026-09-29T13:30:00Z'),
+      });
+    });
+
+    it('accepts a custom time within 30 days', async () => {
+      const { service, prisma } = makeService();
+      prisma.storyBatch.findFirst.mockResolvedValue(dashBatch());
+      const at = '2026-10-02T05:00:00.000Z';
+      await expect(service.pickFromDashboard('org1', 'b1', 2, { at }, MORNING)).resolves.toMatchObject({
+        scheduledFor: new Date(at),
+      });
+      await expect(
+        service.pickFromDashboard('org1', 'b1', 2, { at: '2026-12-31T05:00:00Z' }, MORNING),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it("refuses another workspace's post", async () => {
+      const { service, prisma } = makeService();
+      prisma.storyBatch.findFirst.mockResolvedValue(null);
+      await expect(service.cancelFromDashboard('org2', 'b1')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('cancels only a scheduled post', async () => {
+      const { service, prisma } = makeService();
+      prisma.storyBatch.findFirst.mockResolvedValue(dashBatch({ status: 'SCHEDULED' }));
+      await expect(service.cancelFromDashboard('org1', 'b1')).resolves.toEqual({ status: 'AWAITING_PICK' });
+      prisma.storyBatch.updateMany.mockResolvedValue({ count: 0 });
+      await expect(service.cancelFromDashboard('org1', 'b1')).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+});
+
+describe('scheduling helpers', () => {
+  it('nextDate crosses month ends', () => {
+    expect(nextDate('2026-09-30')).toBe('2026-10-01');
+    expect(nextDate('2026-12-31')).toBe('2027-01-01');
+  });
+
+  it('decodeImage takes a data URL or bare base64, and refuses anything else', () => {
+    const b64 = Buffer.from('img').toString('base64');
+    expect(decodeImage(`data:image/png;base64,${b64}`).toString()).toBe('img');
+    expect(decodeImage(b64).toString()).toBe('img');
+    expect(() => decodeImage('data:text/html;base64,PGgxPg==')).toThrow(BadRequestException);
+    expect(() => decodeImage('')).toThrow(BadRequestException);
+  });
+
+  it('parseScheduleTime wants a time a few minutes to 30 days ahead', () => {
+    expect(parseScheduleTime('2026-09-28T06:00:00Z', MORNING).toISOString()).toBe('2026-09-28T06:00:00.000Z');
+    expect(() => parseScheduleTime('2026-09-28T04:31:00Z', MORNING)).toThrow(BadRequestException);
+    expect(() => parseScheduleTime('soon', MORNING)).toThrow(BadRequestException);
   });
 });
 

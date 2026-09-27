@@ -15,6 +15,10 @@ import { priceLabel } from './industries';
 const MAX_CANDIDATES = 60;
 const MAX_TAGS_PER_POST = 3;
 const LINK_STATUSES = ['AI_SUGGESTED', 'SELLER_CONFIRMED', 'SELLER_REJECTED'];
+const DAY_MS = 24 * 60 * 60 * 1000;
+// How often the scheduler checks which orgs are due; each org still runs once a day.
+const TICK_MS = 60 * 60 * 1000;
+const MAX_NOTE = 500;
 
 type Suggestion = { offeringId: string; confidence: number; reason: string };
 
@@ -38,22 +42,68 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit() {
     if (process.env.NODE_ENV === 'test') return;
-    this.timer = setInterval(() => void this.runAll(), 24 * 60 * 60 * 1000);
+    // Hourly check against the last saved run, so a restart does not push the
+    // daily run back by a day (a 24h timer restarts from zero on every deploy).
+    this.timer = setInterval(() => void this.runDue(), TICK_MS);
   }
 
   onModuleDestroy() {
     if (this.timer) clearInterval(this.timer);
   }
 
-  private async runAll() {
+  /** Runs tagging for every auto-tagging org whose last run is a day old. */
+  async runDue(now = new Date()) {
     const orgs = await this.prisma.businessProfile.findMany({
       where: { autoTagPosts: true },
       select: { orgId: true },
     });
+    let ran = 0;
     for (const { orgId } of orgs) {
+      const last = await this.prisma.postTagRun.findFirst({
+        where: { orgId },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true },
+      });
+      if (last && now.getTime() - last.createdAt.getTime() < DAY_MS) continue;
+      ran += 1;
       await this.run(orgId).catch((e) =>
         this.logger.error(`Auto-tagging failed for ${orgId}: ${e.message}`),
       );
+    }
+    return ran;
+  }
+
+  /**
+   * Makes sure a post that was just commented on is known: its caption is
+   * stored for the reply, and (when auto-tagging is on) it is matched to the
+   * catalog now instead of at the next daily run. Safe to call on every comment.
+   */
+  async ensurePostContext(orgId: string, channelId: string, postId: string) {
+    const known = await this.prisma.socialPost.findUnique({
+      where: { orgId_postId: { orgId, postId } },
+      select: { taggedAt: true },
+    });
+    if (known?.taggedAt) return;
+    const [channel, profile, offeringCount] = await Promise.all([
+      this.prisma.channel.findFirst({
+        where: { id: channelId, orgId },
+        select: { id: true, platform: true },
+      }),
+      this.prisma.businessProfile.findUnique({
+        where: { orgId },
+        select: { autoTagPosts: true },
+      }),
+      this.prisma.offering.count({ where: { orgId, isActive: true } }),
+    ]);
+    if (!channel) return;
+    const autoTag = profile?.autoTagPosts !== false && offeringCount > 0;
+    // Without tagging, the caption only needs fetching once.
+    if (known && !autoTag) return;
+    const post = await this.posts.getPost(orgId, channelId, postId);
+    if (autoTag) {
+      await this.tagPost(orgId, channel, post);
+    } else {
+      await this.rememberPost(orgId, channel, post, null);
     }
   }
 
@@ -92,7 +142,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
       for (const post of posts) {
         seen += 1;
         try {
-          suggested += await this.tagPost(orgId, ch.platform, post);
+          suggested += await this.tagPost(orgId, ch, post);
         } catch (err: any) {
           this.logger.warn(`Tagging post ${post.id} failed: ${err.message}`);
         }
@@ -113,14 +163,21 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
   /** Returns how many new suggestions were stored for this post. */
   private async tagPost(
     orgId: string,
-    platform: string,
+    channel: { id: string; platform: string },
     post: ChannelPost,
   ): Promise<number> {
-    const existing = await this.prisma.postOfferingLink.findMany({
-      where: { orgId, postId: post.id },
-    });
-    if (existing.length) {
-      // Already tagged (or reviewed): only refresh what changes on Meta's side.
+    const platform = channel.platform;
+    const [known, existing] = await Promise.all([
+      this.prisma.socialPost.findUnique({
+        where: { orgId_postId: { orgId, postId: post.id } },
+        select: { taggedAt: true },
+      }),
+      this.prisma.postOfferingLink.count({ where: { orgId, postId: post.id } }),
+    ]);
+    if (known?.taggedAt || existing) {
+      // Already tagged (or reviewed, or matched nothing): only refresh what
+      // changes on Meta's side. A post that matched nothing is not sent to the
+      // AI again every day.
       await this.prisma.postOfferingLink.updateMany({
         where: { orgId, postId: post.id },
         data: {
@@ -130,6 +187,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
           mediaUrl: post.mediaUrl,
         },
       });
+      await this.rememberPost(orgId, channel, post, known?.taggedAt || new Date());
       return 0;
     }
 
@@ -152,7 +210,29 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
         },
       });
     }
+    await this.rememberPost(orgId, channel, post, new Date());
     return suggestions.length;
+  }
+
+  /** Stores the caption and media for the reply context; keeps the seller's note. */
+  private rememberPost(
+    orgId: string,
+    channel: { id: string; platform: string },
+    post: ChannelPost,
+    taggedAt: Date | null,
+  ) {
+    const fields = {
+      channelId: channel.id,
+      platform: channel.platform,
+      caption: post.text?.slice(0, 2000) || null,
+      mediaUrl: post.mediaUrl,
+      permalink: post.permalink,
+    };
+    return this.prisma.socialPost.upsert({
+      where: { orgId_postId: { orgId, postId: post.id } },
+      create: { orgId, postId: post.id, ...fields, taggedAt },
+      update: { ...fields, ...(taggedAt ? { taggedAt } : {}) },
+    });
   }
 
   private async suggest(
@@ -263,16 +343,39 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
       orderBy: [{ createdAt: 'desc' }],
       take: 500,
     });
+    // Posts that matched nothing (and our own daily posts) still show up, so
+    // the seller can add the right item or a note to them.
+    const socials = await this.prisma.socialPost.findMany({
+      where: { orgId },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+    const social = new Map(socials.map((s) => [s.postId, s]));
     const posts = new Map<string, any>();
+    const blank = (s: (typeof socials)[number]) => ({
+      postId: s.postId,
+      platform: s.platform,
+      caption: s.caption,
+      mediaUrl: s.mediaUrl,
+      permalink: s.permalink,
+      likes: null,
+      commentsCount: null,
+      note: s.note,
+      source: s.source,
+      tags: [],
+    });
     for (const l of links) {
+      const s = social.get(l.postId);
       const p = posts.get(l.postId) || {
         postId: l.postId,
         platform: l.platform,
-        caption: l.caption,
-        mediaUrl: l.mediaUrl,
-        permalink: l.permalink,
+        caption: l.caption ?? s?.caption ?? null,
+        mediaUrl: l.mediaUrl ?? s?.mediaUrl ?? null,
+        permalink: l.permalink ?? s?.permalink ?? null,
         likes: l.likes,
         commentsCount: l.commentsCount,
+        note: s?.note ?? null,
+        source: s?.source ?? 'META',
         tags: [],
       };
       p.tags.push({
@@ -284,11 +387,47 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
       });
       posts.set(l.postId, p);
     }
+    if (!status) {
+      for (const s of socials) if (!posts.has(s.postId)) posts.set(s.postId, blank(s));
+    }
     const lastRun = await this.prisma.postTagRun.findFirst({
       where: { orgId },
       orderBy: { createdAt: 'desc' },
     });
     return { posts: [...posts.values()], lastRun };
+  }
+
+  /**
+   * The seller's own context for one post ("offer valid till Sunday", "only
+   * size 7 left"). The AI reads it with the caption; prices still come only
+   * from the catalog.
+   */
+  async setNote(
+    orgId: string,
+    postId: string,
+    input: {
+      note?: string | null;
+      platform?: string;
+      caption?: string | null;
+      mediaUrl?: string | null;
+      permalink?: string | null;
+    },
+  ) {
+    if (!postId) throw new BadRequestException('postId is required');
+    const note = input.note?.trim().slice(0, MAX_NOTE) || null;
+    return this.prisma.socialPost.upsert({
+      where: { orgId_postId: { orgId, postId } },
+      update: { note },
+      create: {
+        orgId,
+        postId,
+        platform: input.platform || 'INSTAGRAM',
+        caption: input.caption?.slice(0, 2000) || null,
+        mediaUrl: input.mediaUrl || null,
+        permalink: input.permalink || null,
+        note,
+      },
+    });
   }
 
   async setStatus(orgId: string, linkId: string, status: string) {
