@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Put,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { InboxService } from './inbox.service';
 import { InboxSyncService } from './inbox-sync.service';
 import { JwtAuthGuard } from '../auth/auth.guard';
@@ -20,7 +29,10 @@ export class InboxController {
 
   // Pulls existing Messenger / Instagram chats from Meta into the inbox.
   @Post('sync')
-  syncFromMeta(@CurrentUser() user: JwtPayload, @Query('platform') platform?: string) {
+  syncFromMeta(
+    @CurrentUser() user: JwtPayload,
+    @Query('platform') platform?: string,
+  ) {
     return this.sync.syncOrg(user.orgId, platform);
   }
 
@@ -30,7 +42,10 @@ export class InboxController {
   }
 
   @Get('threads')
-  listThreads(@CurrentUser() user: JwtPayload, @Query('platform') platform = 'WHATSAPP') {
+  listThreads(
+    @CurrentUser() user: JwtPayload,
+    @Query('platform') platform = 'WHATSAPP',
+  ) {
     return this.inbox.listThreads(user.orgId, platform);
   }
 
@@ -43,12 +58,26 @@ export class InboxController {
     return this.inbox.listMessages(user.orgId, platform, senderId);
   }
 
+  @Put('conversations/:id/ai')
+  setAi(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() body: { enabled: boolean },
+  ) {
+    return this.inbox.setAi(user.orgId, id, body?.enabled !== false);
+  }
+
   @Post('threads/:senderId/reply')
   reply(
     @CurrentUser() user: JwtPayload,
     @Param('senderId') senderId: string,
     @Body() body: { platform: string; text: string },
   ) {
-    return this.inbox.reply(user, body.platform || 'WHATSAPP', senderId, body.text);
+    return this.inbox.reply(
+      user,
+      body.platform || 'WHATSAPP',
+      senderId,
+      body.text,
+    );
   }
 }

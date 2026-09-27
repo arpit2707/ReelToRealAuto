@@ -12,7 +12,9 @@ export type GoalState = {
   offeringIds?: string[];
   fields?: Record<string, string>;
   leadId?: string;
-  handedOff?: boolean;
+  // ISO time until which the AI stays quiet after handing the chat to a
+  // person. Cleared by "Resume AI" in the inbox.
+  handedOffUntil?: string;
 };
 
 export type ContextOffering = {

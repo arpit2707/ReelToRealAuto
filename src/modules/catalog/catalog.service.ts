@@ -288,7 +288,10 @@ export class CatalogService {
       where: { orgId },
     });
     const template = industryOf(profile?.industry);
-    const groups = new Map<string, { input: OfferingInput; line: number }>();
+    const groups = new Map<
+      string,
+      { input: OfferingInput; line: number; invalid: boolean }
+    >();
     const errors: string[] = [];
 
     rows.slice(1).forEach((r, idx) => {
@@ -305,12 +308,20 @@ export class CatalogService {
         const priceMode = (
           get('price_mode') || template.defaultPriceMode
         ).toUpperCase();
+        const problems: string[] = [];
         if (!OFFERING_TYPES.includes(type))
-          errors.push(`Row ${idx + 2}: unknown type "${type}"`);
+          problems.push(`unknown type "${type}"`);
         if (!PRICE_MODES.includes(priceMode))
-          errors.push(`Row ${idx + 2}: unknown price_mode "${priceMode}"`);
+          problems.push(`unknown price_mode "${priceMode}"`);
+        if (get('price') && price == null)
+          problems.push(`price "${get('price')}" is not a number`);
+        // A row with a problem is reported and skipped, never imported with
+        // a guessed value: a wrong price here would reach customers.
+        if (problems.length)
+          errors.push(`Row ${idx + 2} (${title}): ${problems.join(', ')}`);
         g = {
           line: idx + 2,
+          invalid: problems.length > 0,
           input: {
             title,
             type: OFFERING_TYPES.includes(type) ? type : template.defaultType,
@@ -339,7 +350,8 @@ export class CatalogService {
 
     let created = 0;
     let updated = 0;
-    for (const [key, { input, line }] of groups) {
+    for (const [key, { input, line, invalid }] of groups) {
+      if (invalid) continue;
       try {
         const clean = await this.validate(orgId, input);
         const externalRef = key;

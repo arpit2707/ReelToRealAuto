@@ -29,6 +29,8 @@ export type ReplyOutcome = GeneratedReplyResult & {
   leadId?: string;
 };
 
+const HANDOFF_PAUSE_MS = 24 * 60 * 60 * 1000;
+
 const SAFE_DM =
   'Thank you! Iski exact price aur details hamari team aapko thodi der me bhej degi.';
 const SAFE_PUBLIC = 'Thank you! Details DM me bhej di hain.';
@@ -55,11 +57,13 @@ export class ReplyEngineService {
         where: { id: req.conversationId },
         select: { aiEnabled: true, goalState: true },
       });
-      // A seller who took over the chat, or a chat handed to a person, gets no
-      // more automatic answers until they turn the AI back on.
+      // A seller who turned the AI off, or a chat just handed to a person,
+      // gets no automatic answers. A hand-off pauses for a day at most, so a
+      // chat nobody picked up does not stay silent forever.
+      const until = (convo?.goalState as GoalState | null)?.handedOffUntil;
       if (
         convo &&
-        (!convo.aiEnabled || (convo.goalState as GoalState | null)?.handedOff)
+        (!convo.aiEnabled || (until && new Date(until) > new Date()))
       )
         return null;
     }
@@ -144,7 +148,13 @@ export class ReplyEngineService {
         ? outcome.offering_ids
         : previous.offeringIds,
       fields: { ...(previous.fields || {}), ...collected },
-      ...(outcome.action === 'HANDOFF' ? { handedOff: true } : {}),
+      ...(outcome.action === 'HANDOFF'
+        ? {
+            handedOffUntil: new Date(
+              Date.now() + HANDOFF_PAUSE_MS,
+            ).toISOString(),
+          }
+        : {}),
     };
 
     const complete =
