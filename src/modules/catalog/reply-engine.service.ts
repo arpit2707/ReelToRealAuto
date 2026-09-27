@@ -40,6 +40,15 @@ export type ReplyOutcome = GeneratedReplyResult & {
 
 const HANDOFF_PAUSE_MS = 24 * 60 * 60 * 1000;
 
+// The AI could not answer for a technical reason (service down, model error).
+// That is no reason to keep the chat silent for a day; the next message retries.
+function technicalFailure(outcome: GeneratedReplyResult): boolean {
+  return (
+    outcome.intent === 'ai_unavailable' ||
+    outcome.handoff_reason === 'generation_unavailable'
+  );
+}
+
 const SAFE_DM =
   'Thank you! Iski exact price aur details hamari team aapko thodi der me bhej degi.';
 const SAFE_PUBLIC = 'Thank you! Details DM me bhej di hain.';
@@ -202,7 +211,7 @@ export class ReplyEngineService {
         ? outcome.offering_ids
         : previous.offeringIds,
       fields: { ...(previous.fields || {}), ...collected },
-      ...(outcome.action === 'HANDOFF'
+      ...(outcome.action === 'HANDOFF' && !technicalFailure(outcome)
         ? {
             handedOffUntil: new Date(
               Date.now() + HANDOFF_PAUSE_MS,
