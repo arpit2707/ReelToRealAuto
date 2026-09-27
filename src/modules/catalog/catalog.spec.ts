@@ -244,6 +244,29 @@ describe('ReplyEngineService', () => {
     expect(sent.brand_persona.custom_instructions).toContain('Brides in Patna');
   });
 
+  it('pauses the chat for a day only when a person must take over', async () => {
+    const handoff = (reason: string) => ({
+      public_reply: null,
+      private_dm: 'Team aapko reply karegi',
+      intent: 'human_handoff',
+      sentiment: 'neutral',
+      requires_human_attention: true,
+      action: 'HANDOFF',
+      handoff_reason: reason,
+    });
+    const dm = { ...req, eventType: 'dm' as const };
+
+    const soft = make(handoff('missing_information'));
+    await soft.engine.reply(dm);
+    const softState = soft.prisma.conversation.update.mock.calls[0][0].data.goalState;
+    expect(softState.handedOffUntil).toBeUndefined();
+
+    const hard = make(handoff('human_request'));
+    await hard.engine.reply(dm);
+    const hardState = hard.prisma.conversation.update.mock.calls[0][0].data.goalState;
+    expect(new Date(hardState.handedOffUntil).getTime()).toBeGreaterThan(Date.now());
+  });
+
   it('creates a complete lead once every required detail is in', async () => {
     const { engine, leads, prisma } = make(
       {
