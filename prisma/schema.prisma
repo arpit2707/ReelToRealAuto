@@ -549,14 +549,17 @@ model BusinessProfile {
   // Where new leads are announced (seller's own WhatsApp number, E.164 digits).
   alertPhone   String?
   autoTagPosts Boolean      @default(true)
-  // Asked once after the first page or number is connected. Until onboardedAt
-  // is set, no automated reply goes out on any channel.
-  audience     String?
-  tone         String?
-  language     String?
-  // Which automations the seller switched on: DM_REPLY, COMMENT_REPLY, WHATSAPP_REPLY.
-  services     String[]     @default([])
-  onboardedAt  DateTime?
+  // Onboarding & business setup: what the seller told us about the page before automation starts.
+  businessName  String?
+  audience      String?
+  tone          String?
+  replyTone     String?
+  language      String?
+  replyLanguage String?
+  // Automations the seller switched on: DM_REPLY, COMMENT_REPLY, WHATSAPP_REPLY
+  services      String[]     @default([])
+  onboardedAt   DateTime?
+  activatedAt   DateTime?
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 }

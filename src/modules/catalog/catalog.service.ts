@@ -16,8 +16,11 @@ import {
 import { parseCsv } from './csv';
 import {
   LANGUAGES,
+  REPLY_LANGUAGES,
   SERVICES,
   TONES,
+  REPLY_TONES,
+  missingForActivation,
   missingForOnboarding,
   onboardingStatus,
 } from './onboarding';
@@ -63,9 +66,12 @@ export type ProfileInput = {
   faqs?: Array<{ q: string; a: string }> | null;
   alertPhone?: string | null;
   autoTagPosts?: boolean;
+  businessName?: string | null;
   audience?: string | null;
   tone?: string | null;
+  replyTone?: string | null;
   language?: string | null;
+  replyLanguage?: string | null;
   services?: string[];
   // True finishes setup and switches the chosen automations on.
   completeOnboarding?: boolean;
@@ -100,9 +106,11 @@ export class CatalogService {
         industry: 'APPAREL',
         serviceAreas: [],
         autoTagPosts: true,
+        services: [],
+        activatedAt: null,
       },
-      template: industryOf(profile?.industry),
       onboarding: onboardingStatus(profile),
+      template: industryOf(profile?.industry),
       services: SERVICES,
       industries: Object.values(INDUSTRIES).map((i) => ({
         code: i.code,
@@ -115,6 +123,20 @@ export class CatalogService {
   async saveProfile(orgId: string, input: ProfileInput) {
     if (input.industry && !INDUSTRIES[input.industry]) {
       throw new BadRequestException(`Unknown industry ${input.industry}`);
+    }
+    const tone = input.tone ?? input.replyTone;
+    if (tone && !TONES.includes(tone)) {
+      throw new BadRequestException(`Unknown tone ${tone}`);
+    }
+    const language = input.language ?? input.replyLanguage;
+    if (language && !LANGUAGES.includes(language)) {
+      throw new BadRequestException(`Unknown language ${language}`);
+    }
+    const unknown = (input.services || []).filter(
+      (c) => !SERVICES.some((s) => s.code === c),
+    );
+    if (unknown.length) {
+      throw new BadRequestException(`Unknown service ${unknown.join(', ')}`);
     }
     const data = {
       industry: input.industry,
@@ -135,24 +157,14 @@ export class CatalogService {
         input.alertPhone === undefined
           ? undefined
           : normalizePhone(input.alertPhone),
-      autoTagPosts: input.autoTagPosts,
+      businessName: input.businessName?.trim() ?? input.businessName,
       audience: input.audience,
-      tone: input.tone,
-      language: input.language,
-      services: input.services,
+      tone: input.tone ?? input.replyTone,
+      replyTone: input.replyTone ?? input.tone,
+      language: input.language ?? input.replyLanguage,
+      replyLanguage: input.replyLanguage ?? input.language,
+      services: input.services ? [...new Set(input.services)] : undefined,
     };
-    if (input.tone && !TONES.includes(input.tone)) {
-      throw new BadRequestException(`Unknown tone ${input.tone}`);
-    }
-    if (input.language && !LANGUAGES.includes(input.language)) {
-      throw new BadRequestException(`Unknown language ${input.language}`);
-    }
-    const unknown = (input.services || []).filter(
-      (c) => !SERVICES.some((s) => s.code === c),
-    );
-    if (unknown.length) {
-      throw new BadRequestException(`Unknown service ${unknown.join(', ')}`);
-    }
     if (input.completeOnboarding) {
       const existing = await this.prisma.businessProfile.findUnique({
         where: { orgId },
@@ -170,13 +182,46 @@ export class CatalogService {
     const onboardedAt = input.completeOnboarding ? new Date() : undefined;
     await this.prisma.businessProfile.upsert({
       where: { orgId },
-      update: { ...data, ...(onboardedAt ? { onboardedAt } : {}) },
+      update: {
+        ...data,
+        ...(onboardedAt ? { onboardedAt, activatedAt: onboardedAt } : {}),
+      },
       create: {
         orgId,
         ...data,
         industry: input.industry || 'APPAREL',
         onboardedAt,
+        activatedAt: onboardedAt,
       },
+    });
+    return this.getProfile(orgId);
+  }
+
+  /** Switches automation on once the seller has told us enough about the page. */
+  async activate(orgId: string) {
+    const profile = await this.prisma.businessProfile.findUnique({
+      where: { orgId },
+    });
+    const missing = missingForActivation(profile);
+    if (missing.length) {
+      throw new BadRequestException({
+        message: 'Finish the business setup before turning automation on',
+        missing,
+      });
+    }
+    if (!profile!.activatedAt) {
+      await this.prisma.businessProfile.update({
+        where: { orgId },
+        data: { activatedAt: new Date() },
+      });
+    }
+    return this.getProfile(orgId);
+  }
+
+  async deactivate(orgId: string) {
+    await this.prisma.businessProfile.updateMany({
+      where: { orgId },
+      data: { activatedAt: null },
     });
     return this.getProfile(orgId);
   }

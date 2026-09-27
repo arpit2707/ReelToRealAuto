@@ -8,7 +8,13 @@ import {
 import { ReplyContextService, type GoalState } from './reply-context.service';
 import { LeadsService } from './leads.service';
 import { unknownPrices } from './price-guard';
-import { replyBlockedReason, serviceFor, TONES, LANGUAGES } from './onboarding';
+import {
+  replyBlockedReason,
+  automationBlock,
+  serviceFor,
+  TONES,
+  LANGUAGES,
+} from './onboarding';
 
 export type ReplyRequest = {
   orgId: string;
@@ -20,6 +26,8 @@ export type ReplyRequest = {
   senderName?: string | null;
   postId?: string | null;
   conversationId?: string | null;
+  // A seller trying the AI from the dashboard; works before onboarding too.
+  preview?: boolean;
 };
 
 export type ReplyOutcome = GeneratedReplyResult & {
@@ -69,9 +77,7 @@ export class ReplyEngineService {
     req: ReplyRequest,
     opts: { preview?: boolean } = {},
   ): Promise<ReplyOutcome | null> {
-    // Nothing goes out until the seller has told us what the page is about
-    // and switched this automation on. A preview only shows what would be
-    // said, so it works before setup too.
+    const isPreview = Boolean(req.preview || opts.preview);
     const profile = await this.prisma.businessProfile.findUnique({
       where: { orgId: req.orgId },
     });
@@ -79,7 +85,7 @@ export class ReplyEngineService {
       profile,
       serviceFor(req.platform, req.eventType),
     );
-    if (blocked && !opts.preview) {
+    if (blocked && !isPreview) {
       this.logger.log(
         `No automated ${req.platform} ${req.eventType} reply for org ${req.orgId}: ${blocked}`,
       );
@@ -117,15 +123,17 @@ export class ReplyEngineService {
       sender_id: req.senderId,
       ...(req.postId ? { post_context: { post_id: req.postId } } : {}),
       brand_persona: {
-        brand_name: req.brandName,
-        ...(profile?.tone && TONES.includes(profile.tone)
-          ? { tone: profile.tone }
+        brand_name: profile?.businessName || req.brandName,
+        ...((profile?.tone || profile?.replyTone) &&
+        TONES.includes((profile?.tone || profile?.replyTone) as string)
+          ? { tone: (profile?.tone || profile?.replyTone) as string }
           : {}),
-        ...(profile?.language && LANGUAGES.includes(profile.language)
-          ? { language_mode: profile.language }
+        ...((profile?.language || profile?.replyLanguage) &&
+        LANGUAGES.includes((profile?.language || profile?.replyLanguage) as string)
+          ? { language_mode: (profile?.language || profile?.replyLanguage) as string }
           : {}),
         ...(styleNotes(profile)
-          ? { custom_instructions: styleNotes(profile) }
+          ? { custom_instructions: styleNotes(profile) as string }
           : {}),
       },
       business: ctx.business,
