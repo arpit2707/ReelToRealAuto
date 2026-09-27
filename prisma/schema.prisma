@@ -27,13 +27,13 @@ model User {
 }
 
 model RefreshToken {
-  id        String   @id @default(uuid())
+  id        String    @id @default(uuid())
   userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tokenHash String   @unique
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
   expiresAt DateTime
   revokedAt DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 }
 
 model OauthState {
@@ -47,35 +47,40 @@ model OauthState {
 }
 
 model Organization {
-  id           String               @id @default(uuid())
-  name         String
-  slug         String               @unique
-  planId       String?
-  timezone     String               @default("Asia/Kolkata")
-  parentId     String?
-  parent       Organization?        @relation("OrgTree", fields: [parentId], references: [id])
-  children     Organization[]       @relation("OrgTree")
-  brandPersona Json?
-  createdAt    DateTime             @default(now())
-  updatedAt    DateTime             @updatedAt
-  members      OrganizationMember[]
-  channels     Channel[]
-  products     Product[]
-  postMappings PostMapping[]
-  interactions InteractionLog[]
-  rules        AutomationRule[]
-  contacts     Contact[]
-  templates    WhatsAppTemplate[]
-  campaigns    BroadcastCampaign[]
-  shopifyStores ShopifyStore[]
-  orders       EcommerceOrder[]
-  abandonedCarts AbandonedCart[]
-  wallet       Wallet?
-  connections  MetaConnection[]
-  conversations Conversation[]
-  webhookEvents WebhookEvent[]
-  storySettings StorySettings?
-  storyBatches  StoryBatch[]
+  id                String               @id @default(uuid())
+  name              String
+  slug              String               @unique
+  planId            String?
+  timezone          String               @default("Asia/Kolkata")
+  parentId          String?
+  parent            Organization?        @relation("OrgTree", fields: [parentId], references: [id])
+  children          Organization[]       @relation("OrgTree")
+  brandPersona      Json?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  members           OrganizationMember[]
+  channels          Channel[]
+  products          Product[]
+  postMappings      PostMapping[]
+  interactions      InteractionLog[]
+  rules             AutomationRule[]
+  contacts          Contact[]
+  templates         WhatsAppTemplate[]
+  campaigns         BroadcastCampaign[]
+  shopifyStores     ShopifyStore[]
+  orders            EcommerceOrder[]
+  abandonedCarts    AbandonedCart[]
+  wallet            Wallet?
+  connections       MetaConnection[]
+  conversations     Conversation[]
+  webhookEvents     WebhookEvent[]
+  storySettings     StorySettings?
+  storyBatches      StoryBatch[]
+  businessProfile   BusinessProfile?
+  offerings         Offering[]
+  postOfferingLinks PostOfferingLink[]
+  leads             Lead[]
+  postTagRuns       PostTagRun[]
 }
 
 model OrganizationMember {
@@ -91,33 +96,33 @@ model OrganizationMember {
 }
 
 model Channel {
-  id                   String           @id @default(uuid())
+  id                   String          @id @default(uuid())
   orgId                String
-  org                  Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  org                  Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
   connectionId         String?
-  connection           MetaConnection?  @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  connection           MetaConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
   platform             String
   channelIdentifier    String
   name                 String
   handle               String?
   avatarUrl            String?
   accessTokenEncrypted String
-  keyVersion           Int              @default(1)
-  permissions          String[]         @default([])
-  subscribedFields     String[]         @default([])
-  graphVersion         String           @default("v24.0")
+  keyVersion           Int             @default(1)
+  permissions          String[]        @default([])
+  subscribedFields     String[]        @default([])
+  graphVersion         String          @default("v24.0")
   tokenExpiresAt       DateTime?
   dataAccessExpiresAt  DateTime?
-  status               String           @default("ACTIVE")
+  status               String          @default("ACTIVE")
   lastError            Json?
   lastHealthCheckAt    DateTime?
   lastInboundAt        DateTime?
   linkedChannelId      String?
   metadata             Json?
-  isActive             Boolean          @default(true)
+  isActive             Boolean         @default(true)
   conversations        Conversation[]
-  createdAt            DateTime         @default(now())
-  updatedAt            DateTime         @updatedAt
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
 
   @@unique([platform, channelIdentifier])
   @@index([orgId, platform])
@@ -166,22 +171,26 @@ model InboxContact {
 }
 
 model Conversation {
-  id              String        @id @default(uuid())
+  id              String         @id @default(uuid())
   orgId           String
-  org             Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  org             Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
   channelId       String
-  channel         Channel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  channel         Channel        @relation(fields: [channelId], references: [id], onDelete: Cascade)
   contactId       String
-  contact         InboxContact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  contact         InboxContact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
   lastInboundAt   DateTime?
   lastOutboundAt  DateTime?
   windowExpiresAt DateTime?
-  status          String        @default("OPEN")
+  status          String         @default("OPEN")
   assignedTo      String?
-  aiEnabled       Boolean       @default(true)
-  unreadCount     Int           @default(0)
+  aiEnabled       Boolean        @default(true)
+  unreadCount     Int            @default(0)
   messages        InboxMessage[]
-  updatedAt       DateTime      @updatedAt
+  // What the AI has learned so far in this chat (date, city, guests, chosen
+  // offering) so it never asks the same question twice.
+  goalState       Json?
+  leads           Lead[]
+  updatedAt       DateTime       @updatedAt
 
   @@unique([channelId, contactId])
   @@index([orgId, status, lastInboundAt])
@@ -206,7 +215,7 @@ model InboxMessage {
 }
 
 model WebhookEvent {
-  id          String       @id @default(uuid())
+  id          String        @id @default(uuid())
   orgId       String?
   org         Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
   object      String
@@ -215,18 +224,18 @@ model WebhookEvent {
   payload     Json
   processedAt DateTime?
   error       Json?
-  receivedAt  DateTime     @default(now())
+  receivedAt  DateTime      @default(now())
 
   @@index([object, receivedAt])
 }
 
 model DataDeletionRequest {
-  id                 String   @id @default(uuid())
-  confirmationCode   String   @unique
-  metaUserId         String?
-  status             String   @default("pending")
-  createdAt          DateTime @default(now())
-  completedAt        DateTime?
+  id               String    @id @default(uuid())
+  confirmationCode String    @unique
+  metaUserId       String?
+  status           String    @default("pending")
+  createdAt        DateTime  @default(now())
+  completedAt      DateTime?
 }
 
 model AutomationRule {
@@ -292,6 +301,8 @@ model InteractionLog {
   requiresHuman   Boolean      @default(false)
   isResolved      Boolean      @default(false)
   externalEventId String?      @unique
+  offeringIds     String[]     @default([])
+  action          String?
   createdAt       DateTime     @default(now())
 }
 
@@ -392,25 +403,25 @@ model ShopifyStore {
 }
 
 model EcommerceOrder {
-  id             String       @id @default(uuid())
-  orgId          String
-  org            Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  orderId        String
-  customerPhone  String
-  customerName   String?
-  totalAmount    Float
-  currency       String       @default("INR")
-  paymentMethod  String       @default("COD")
-  orderStatus    String       @default("OPEN")
-  codStatus      String       @default("PENDING")
-  confirmedAt    DateTime?
-  cancelledAt    DateTime?
-  checkoutToken  String?
-  itemsSummary   String?
+  id                 String       @id @default(uuid())
+  orgId              String
+  org                Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  orderId            String
+  customerPhone      String
+  customerName       String?
+  totalAmount        Float
+  currency           String       @default("INR")
+  paymentMethod      String       @default("COD")
+  orderStatus        String       @default("OPEN")
+  codStatus          String       @default("PENDING")
+  confirmedAt        DateTime?
+  cancelledAt        DateTime?
+  checkoutToken      String?
+  itemsSummary       String?
   confirmationSentAt DateTime?
   confirmationError  String?
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
 
   @@unique([orgId, orderId])
   @@index([orgId, createdAt])
@@ -460,7 +471,6 @@ model WalletTransaction {
   referenceId String?
   createdAt   DateTime @default(now())
 }
-
 
 // Daily Instagram story ideas: Gemini drafts four options each morning, the
 // merchant picks one on WhatsApp, and the pick is published as an IG story.
@@ -515,4 +525,168 @@ model StoryOption {
   createdAt      DateTime   @default(now())
 
   @@unique([batchId, position])
+}
+
+// ---------------------------------------------------------------------------
+// Offerings: one catalog shape for every industry. What differs per industry
+// (footwear, bridal makeup, hotel, travel, real estate, food) lives in the
+// industry template in code, and in the `attributes` JSON, not in new columns.
+// ---------------------------------------------------------------------------
+
+model BusinessProfile {
+  id           String       @id @default(uuid())
+  orgId        String       @unique
+  org          Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  industry     String       @default("APPAREL")
+  description  String?
+  city         String?
+  serviceAreas String[]     @default([])
+  hours        String?
+  // { delivery, returns, advance, cancellation, payment } as short sentences.
+  policies     Json?
+  // [{ q, a }]
+  faqs         Json?
+  // Where new leads are announced (seller's own WhatsApp number, E.164 digits).
+  alertPhone   String?
+  autoTagPosts Boolean      @default(true)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+}
+
+model Offering {
+  id            String                @id @default(uuid())
+  orgId         String
+  org           Organization          @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  // PRODUCT | SERVICE | PACKAGE | ROOM | PROPERTY | TRIP | MENU_ITEM
+  type          String                @default("PRODUCT")
+  title         String
+  description   String?
+  // FIXED | STARTING_FROM | RANGE | PER_NIGHT | PER_PERSON | ON_REQUEST
+  priceMode     String                @default("FIXED")
+  priceMin      Float?
+  priceMax      Float?
+  currency      String                @default("INR")
+  attributes    Json?
+  actionUrl     String?
+  imageUrl      String?
+  sku           String?
+  // Where it came from, so a re-sync updates instead of duplicating.
+  source        String                @default("MANUAL")
+  externalRef   String?
+  isActive      Boolean               @default(true)
+  // Bookable offerings (makeup, rooms) track dates that are already taken.
+  bookable      Boolean               @default(false)
+  dailyCapacity Int?
+  variants      OfferingVariant[]
+  components    PackageItem[]         @relation("PackageParent")
+  includedIn    PackageItem[]         @relation("PackageChild")
+  postLinks     PostOfferingLink[]
+  leads         Lead[]
+  blockedDates  OfferingBlockedDate[]
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  @@unique([orgId, source, externalRef])
+  @@index([orgId, isActive])
+}
+
+model OfferingVariant {
+  id         String    @id @default(uuid())
+  offeringId String
+  offering   Offering  @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  // "Size 8 / Tan", "Deluxe · weekend", "2BHK"
+  label      String
+  options    Json?
+  price      Float?
+  stock      Int?
+  validFrom  DateTime?
+  validTo    DateTime?
+  position   Int       @default(0)
+
+  @@index([offeringId])
+}
+
+model PackageItem {
+  id        String   @id @default(uuid())
+  packageId String
+  package   Offering @relation("PackageParent", fields: [packageId], references: [id], onDelete: Cascade)
+  itemId    String
+  item      Offering @relation("PackageChild", fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([packageId, itemId])
+}
+
+model OfferingBlockedDate {
+  id         String   @id @default(uuid())
+  offeringId String
+  offering   Offering @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  // YYYY-MM-DD in the org's timezone.
+  date       String
+  // How many of dailyCapacity are taken; null means the whole day is closed.
+  booked     Int?
+  note       String?
+
+  @@unique([offeringId, date])
+}
+
+model PostOfferingLink {
+  id            String       @id @default(uuid())
+  orgId         String
+  org           Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  postId        String
+  platform      String
+  caption       String?
+  mediaUrl      String?
+  permalink     String?
+  offeringId    String
+  offering      Offering     @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  // AI_SUGGESTED | SELLER_CONFIRMED | SELLER_REJECTED
+  status        String       @default("AI_SUGGESTED")
+  confidence    Float        @default(0)
+  reason        String?
+  likes         Int?
+  commentsCount Int?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([postId, offeringId])
+  @@index([orgId, status])
+}
+
+model PostTagRun {
+  id         String       @id @default(uuid())
+  orgId      String
+  org        Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  status     String       @default("RUNNING")
+  postsSeen  Int          @default(0)
+  suggested  Int          @default(0)
+  error      String?
+  createdAt  DateTime     @default(now())
+  finishedAt DateTime?
+
+  @@index([orgId, createdAt])
+}
+
+model Lead {
+  id             String        @id @default(uuid())
+  orgId          String
+  org            Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  offeringId     String?
+  offering       Offering?     @relation(fields: [offeringId], references: [id], onDelete: SetNull)
+  platform       String
+  contactName    String?
+  contactHandle  String?
+  // Whatever the AI collected: date, city, guests, budget, config…
+  fields         Json
+  // NEW | CONTACTED | BOOKED | LOST
+  status         String        @default("NEW")
+  notes          String?
+  alertSentAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([conversationId, offeringId])
+  @@index([orgId, status, createdAt])
 }

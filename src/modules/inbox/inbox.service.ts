@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { MetaPublisherService } from '../meta-publisher/meta-publisher.service';
@@ -23,7 +24,14 @@ export class InboxService {
     return this.prisma.channel.findMany({
       where: { orgId, isActive: true, status: { not: 'DISCONNECTED' } },
       orderBy: { platform: 'asc' },
-      select: { id: true, platform: true, name: true, channelIdentifier: true, status: true, handle: true },
+      select: {
+        id: true,
+        platform: true,
+        name: true,
+        channelIdentifier: true,
+        status: true,
+        handle: true,
+      },
     });
   }
 
@@ -51,7 +59,11 @@ export class InboxService {
   async listThreads(orgId: string, platform: string) {
     const rows = await this.prisma.conversation.findMany({
       where: { orgId, channel: { platform: platform.toUpperCase() } },
-      include: { contact: true, channel: true, messages: { orderBy: { createdAt: 'desc' }, take: 1 } },
+      include: {
+        contact: true,
+        channel: true,
+        messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+      },
       orderBy: { lastInboundAt: { sort: 'desc', nulls: 'last' } },
       take: 100,
     });
@@ -64,10 +76,35 @@ export class InboxService {
       status: c.status,
       lastAt: (c.lastInboundAt || c.updatedAt).toISOString(),
       windowExpiresAt: c.windowExpiresAt,
+      aiPaused: aiPaused(c),
     }));
   }
 
-  async listMessages(orgId: string, platform: string, conversationOrPeerId: string) {
+  /** Turns automatic replies on or off for one chat. */
+  async setAi(orgId: string, conversationId: string, enabled: boolean) {
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, orgId },
+    });
+    if (!conversation) throw new NotFoundException('Conversation not found');
+    const goalState = {
+      ...((conversation.goalState as Record<string, unknown>) || {}),
+    };
+    delete goalState.handedOffUntil;
+    const updated = await this.prisma.conversation.update({
+      where: { id: conversation.id },
+      data: {
+        aiEnabled: enabled,
+        goalState: goalState as Prisma.InputJsonValue,
+      },
+    });
+    return { id: updated.id, aiPaused: aiPaused(updated) };
+  }
+
+  async listMessages(
+    orgId: string,
+    platform: string,
+    conversationOrPeerId: string,
+  ) {
     let conversation = await this.prisma.conversation.findFirst({
       where: { id: conversationOrPeerId, orgId },
     });
@@ -181,7 +218,18 @@ export class InboxService {
         `Meta did not deliver the reply: ${failure.message || 'unknown error'}`,
       );
     }
-    await this.conversations.ingestOutbound(user.orgId, conversation.id, text, 'HUMAN');
+    await this.conversations.ingestOutbound(
+      user.orgId,
+      conversation.id,
+      text,
+      'HUMAN',
+    );
     return { ok: true };
   }
+}
+
+function aiPaused(c: { aiEnabled: boolean; goalState: unknown }): boolean {
+  const until = (c.goalState as { handedOffUntil?: string } | null)
+    ?.handedOffUntil;
+  return !c.aiEnabled || Boolean(until && new Date(until) > new Date());
 }

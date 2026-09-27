@@ -67,6 +67,24 @@ export class GeminiClient {
     return ideas.slice(0, count);
   }
 
+  /**
+   * Structured JSON answer from the text model, optionally looking at one
+   * image. Used for tagging posts with catalog items.
+   */
+  async generateJson<T>(
+    prompt: string,
+    responseSchema: unknown,
+    image?: { data: Buffer; mimeType: string },
+  ): Promise<T> {
+    const parts: unknown[] = [{ text: prompt }];
+    if (image) parts.push({ inline_data: { mime_type: image.mimeType, data: image.data.toString('base64') } });
+    const json = await this.call(this.textModel(), {
+      contents: [{ role: 'user', parts }],
+      generationConfig: { temperature: 0.1, responseMimeType: 'application/json', responseSchema },
+    });
+    return JSON.parse(extractText(json)) as T;
+  }
+
   /** Returns raw image bytes (usually PNG) for a vertical story image. */
   async generateImage(prompt: string): Promise<Buffer> {
     const body = {

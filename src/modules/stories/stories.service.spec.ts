@@ -24,7 +24,7 @@ function makeService() {
         accessTokenEncrypted: 'enc',
       }),
     },
-    product: { findMany: jest.fn().mockResolvedValue([]) },
+    offering: { findMany: jest.fn().mockResolvedValue([]) },
     storyBatch: {
       findUnique: jest.fn(),
       findFirst: jest.fn(),
