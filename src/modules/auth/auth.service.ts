@@ -78,7 +78,7 @@ export class AuthService {
     });
     if (!member) throw new UnauthorizedException('Not a member of this workspace');
     const channels = await this.prisma.channel.findMany({
-      where: { orgId: payload.orgId },
+      where: { orgId: payload.orgId, status: { not: 'DISCONNECTED' } },
       orderBy: { createdAt: 'desc' },
     });
     return {
