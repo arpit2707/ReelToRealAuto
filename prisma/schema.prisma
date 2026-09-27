@@ -486,6 +486,16 @@ model StorySettings {
   businessDescription String?
   // Semrush regional database, e.g. "in" or "us".
   keywordDatabase     String       @default("in")
+  // Local time (org timezone, "HH:MM") the day's ideas are sent, and when the picked one goes live.
+  sendTime            String       @default("09:00")
+  postTime            String       @default("19:00")
+  optionCount         Int          @default(5)
+  // IG_STORY | IG_FEED | FB_FEED
+  destinations        String[]     @default(["IG_STORY"])
+  // Channel.id of the Facebook Page for FB_FEED; the org's first active one when null.
+  facebookChannelId   String?
+  // Seller's own seed terms for trend research, on top of the business profile.
+  nicheKeywords       String[]     @default([])
   createdAt           DateTime     @default(now())
   updatedAt           DateTime     @updatedAt
 }
@@ -500,6 +510,14 @@ model StoryBatch {
   waRecipient      String?
   selectedOptionId String?
   publishedMediaId String?
+  // Trending keywords researched before the ideas were written.
+  trendKeywords    String[]      @default([])
+  // Option the merchant is currently describing changes for on WhatsApp.
+  editingOptionId  String?
+  // When the picked option is due to go live (status SCHEDULED).
+  scheduledFor     DateTime?
+  // { IG_STORY: { ok, id?, error? }, ... }
+  publishedTargets Json?
   error            Json?
   options          StoryOption[]
   createdAt        DateTime      @default(now())
@@ -507,6 +525,7 @@ model StoryBatch {
 
   @@unique([orgId, forDate])
   @@index([status, createdAt])
+  @@index([status, scheduledFor])
 }
 
 model StoryOption {
@@ -515,7 +534,11 @@ model StoryOption {
   batch          StoryBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
   position       Int
   title          String
+  // Short tag shown on WhatsApp, e.g. "Trending: HD bridal base".
+  label          String     @default("")
   idea           String
+  caption        String?
+  revision       Int        @default(0)
   imagePrompt    String
   seedKeyword    String
   imageData      Bytes?

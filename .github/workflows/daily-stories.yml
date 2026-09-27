@@ -1,10 +1,12 @@
-name: Daily story ideas
+name: Daily posts
 
 # Render's free plan sleeps, so an in-process timer cannot be trusted. This
-# wakes the API once a day and starts the run; retries cover the cold start.
+# wakes the API every 15 minutes; the API sends ideas to each seller once their
+# chosen send time has passed and publishes picks at their posting time.
+# Retries cover the cold start. GitHub may delay scheduled runs by a few minutes.
 on:
   schedule:
-    - cron: '30 3 * * *' # 09:00 IST
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 jobs:

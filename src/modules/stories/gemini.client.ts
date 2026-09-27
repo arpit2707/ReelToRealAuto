@@ -2,7 +2,9 @@ import { Injectable, Logger } from '@nestjs/common';
 
 export type StoryIdea = {
   title: string;
+  label: string;
   idea: string;
+  caption: string;
   imagePrompt: string;
   seedKeyword: string;
 };
@@ -11,9 +13,20 @@ export type BusinessContext = {
   brandName: string;
   instagramHandle?: string | null;
   description?: string | null;
+  industry?: string | null;
   persona?: unknown;
   products: Array<{ title: string; price: number; currency: string }>;
   recentTitles: string[];
+  forDate: string;
+  // Today's researched keywords; each idea should target one of them.
+  trendKeywords?: string[];
+};
+
+export type NicheContext = {
+  industry?: string | null;
+  description?: string | null;
+  seeds: string[];
+  trendingHashtags: string[];
   forDate: string;
 };
 
@@ -49,11 +62,13 @@ export class GeminiClient {
             type: 'OBJECT',
             properties: {
               title: { type: 'STRING' },
+              label: { type: 'STRING' },
               idea: { type: 'STRING' },
+              caption: { type: 'STRING' },
               imagePrompt: { type: 'STRING' },
               seedKeyword: { type: 'STRING' },
             },
-            required: ['title', 'idea', 'imagePrompt', 'seedKeyword'],
+            required: ['title', 'label', 'idea', 'caption', 'imagePrompt', 'seedKeyword'],
           },
         },
       },
@@ -65,6 +80,35 @@ export class GeminiClient {
       throw new Error(`Gemini returned ${ideas.length} usable ideas, expected ${count}`);
     }
     return ideas.slice(0, count);
+  }
+
+  /**
+   * Ranks what people in this niche are searching and posting about today.
+   * Apify's trending hashtags are the evidence; Gemini turns them (plus the
+   * niche) into search phrases, and works from the niche alone if Apify had none.
+   */
+  async trendKeywords(ctx: NicheContext, count = 10): Promise<string[]> {
+    const prompt = [
+      `You research Instagram and Google search trends for small Indian businesses. Today is ${ctx.forDate}.`,
+      ctx.industry ? `Industry: ${ctx.industry}` : '',
+      ctx.description ? `Business: ${ctx.description}` : '',
+      ctx.seeds.length ? `Niche terms: ${ctx.seeds.join(', ')}` : '',
+      ctx.trendingHashtags.length
+        ? `Hashtags trending on Instagram posts in this niche right now: ${ctx.trendingHashtags.join(' ')}`
+        : '',
+      `Return the ${count} keyword phrases this business should post about today, most promising first.`,
+      'Favour what is trending now (season, wedding dates, festivals, the hashtags above) over evergreen terms.',
+      'Each phrase: 1 to 4 words, lowercase, in the words Indian customers actually search (English or Hinglish).',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const phrases = await this.generateJson<string[]>(prompt, {
+      type: 'ARRAY',
+      items: { type: 'STRING' },
+    });
+    return [...new Set((Array.isArray(phrases) ? phrases : []).map((p) => String(p).trim().toLowerCase()))]
+      .filter((p) => p && p.length <= 60)
+      .slice(0, count);
   }
 
   /**
@@ -96,6 +140,32 @@ export class GeminiClient {
               text:
                 `${prompt}\n\nVertical 9:16 Instagram story, photorealistic or clean graphic style, ` +
                 'no watermarks, leave the top and bottom 15% free of important detail.',
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        responseModalities: ['IMAGE'],
+        imageConfig: { aspectRatio: '9:16' },
+      },
+    };
+    return extractImage(await this.call(this.imageModel(), body));
+  }
+
+  /** Applies the merchant's WhatsApp instruction ("background golden karo") to a draft. */
+  async editImage(image: Buffer, mimeType: string, instruction: string): Promise<Buffer> {
+    const body = {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType, data: image.toString('base64') } },
+            {
+              text:
+                'Edit this Instagram image as the business owner asks, and change nothing else. ' +
+                'The request may be in Hindi, Hinglish or English. Keep it photorealistic, add no text or watermark ' +
+                'unless the request asks for text.\n' +
+                `Request: ${instruction.slice(0, 500)}`,
             },
           ],
         },
@@ -158,20 +228,27 @@ export function buildIdeasPrompt(ctx: BusinessContext, count: number): string {
     .map((p) => `- ${p.title} (${p.currency} ${p.price})`)
     .join('\n');
   const persona = ctx.persona ? JSON.stringify(ctx.persona).slice(0, 800) : '';
+  const trends = (ctx.trendKeywords || []).slice(0, 10);
   return [
     `You are a social media strategist for an Indian small business. Today is ${ctx.forDate}.`,
-    `Write ${count} distinct Instagram story ideas for "${ctx.brandName}"` +
+    `Write ${count} distinct Instagram post ideas for "${ctx.brandName}"` +
       (ctx.instagramHandle ? ` (@${ctx.instagramHandle})` : '') +
       '. Each must promote the business and feel timely (festivals, season, weekday, trends in India).',
+    ctx.industry ? `Industry: ${ctx.industry}` : '',
     ctx.description ? `About the business: ${ctx.description}` : '',
     persona ? `Brand persona: ${persona}` : '',
     products ? `Products:\n${products}` : '',
-    ctx.recentTitles.length ? `Avoid repeating these recent stories: ${ctx.recentTitles.join('; ')}` : '',
+    trends.length
+      ? `Trending keywords in this niche today, best first: ${trends.join('; ')}. Build each idea around a different one.`
+      : '',
+    ctx.recentTitles.length ? `Avoid repeating these recent posts: ${ctx.recentTitles.join('; ')}` : '',
     'For each idea return:',
-    '- title: at most 24 characters, used as the WhatsApp list label',
-    '- idea: one or two sentences (max 200 characters) describing the story for the owner',
-    '- imagePrompt: a detailed prompt for an image model to draw the story visual, with no text in the image',
-    '- seedKeyword: a 1 to 3 word search phrase people would type to find this topic (English, lowercase)',
+    '- title: at most 24 characters, the headline lettered on the image',
+    '- label: at most 30 characters naming why it is suggested, e.g. "Trending: hd bridal base"',
+    '- idea: one or two sentences (max 200 characters) describing the post for the owner',
+    '- caption: the Instagram/Facebook caption, 1 to 3 short lines in the brand voice with a call to action, no hashtags',
+    '- imagePrompt: a detailed prompt for an image model to draw the visual, with no text in the image',
+    '- seedKeyword: the trending keyword this idea targets (lowercase, 1 to 4 words)',
   ]
     .filter(Boolean)
     .join('\n');
@@ -198,9 +275,15 @@ export function parseIdeas(text: string): StoryIdea[] {
       title: String(r?.title || '')
         .trim()
         .slice(0, 24),
+      label: String(r?.label || '')
+        .trim()
+        .slice(0, 30),
       idea: String(r?.idea || '')
         .trim()
         .slice(0, 300),
+      caption: String(r?.caption || '')
+        .trim()
+        .slice(0, 1000),
       imagePrompt: String(r?.imagePrompt || '').trim(),
       seedKeyword: String(r?.seedKeyword || '')
         .trim()

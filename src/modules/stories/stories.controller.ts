@@ -26,8 +26,9 @@ export class StoriesController {
   constructor(private readonly stories: StoriesService) {}
 
   /**
-   * Called once a day by the scheduled GitHub Action. Answers at once and keeps
-   * working in the background, since generating images for every org is slow.
+   * Called every 15 minutes by the scheduled GitHub Action: sends ideas to orgs
+   * whose send time has passed and publishes picks that are due. Answers at once
+   * and keeps working in the background, since generating images is slow.
    */
   @Post('cron/daily')
   @HttpCode(202)
@@ -75,8 +76,14 @@ export class StoriesController {
       enabled?: boolean;
       whatsappNumber?: string | null;
       instagramChannelId?: string | null;
+      facebookChannelId?: string | null;
       businessDescription?: string | null;
       keywordDatabase?: string;
+      sendTime?: string;
+      postTime?: string;
+      optionCount?: number;
+      destinations?: string[];
+      nicheKeywords?: string[];
     },
   ) {
     return this.stories.updateSettings(user.orgId, body || {});

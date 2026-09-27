@@ -456,16 +456,75 @@ export class MetaPublisherService {
     accessToken: string,
     opts: { pollIntervalMs?: number; maxPolls?: number } = {},
   ): Promise<string> {
+    return this.publishInstagramMedia(igUserId, { media_type: 'STORIES', image_url: imageUrl }, accessToken, 'story', opts);
+  }
+
+  /** Same container → poll → publish flow as a story, as a regular feed photo with a caption. */
+  async publishInstagramFeed(
+    igUserId: string,
+    imageUrl: string,
+    caption: string,
+    accessToken: string,
+    opts: { pollIntervalMs?: number; maxPolls?: number } = {},
+  ): Promise<string> {
+    return this.publishInstagramMedia(igUserId, { image_url: imageUrl, caption }, accessToken, 'post', opts);
+  }
+
+  /** Posts a photo with a message to a Facebook Page's feed. Needs pages_manage_posts. */
+  async publishFacebookPhoto(pageId: string, imageUrl: string, message: string, pageToken: string): Promise<string> {
+    const url = new URL(graphUrl(`/${pageId}/photos`));
+    url.searchParams.set('url', imageUrl);
+    url.searchParams.set('message', message);
+    url.searchParams.set('published', 'true');
+    const json = await this.graphJson(
+      await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${pageToken}` } }),
+      'photo post',
+      'Facebook',
+    );
+    return String(json.post_id || json.id);
+  }
+
+  /** An image with up to three reply buttons under it (only inside the 24h window). */
+  async sendWhatsAppImageButtons(
+    phoneNumberId: string,
+    toWaId: string,
+    imageUrl: string,
+    bodyText: string,
+    buttons: Array<{ id: string; title: string }>,
+    accessToken: string,
+  ): Promise<boolean> {
+    return this.postWhatsApp(phoneNumberId, accessToken, 'image buttons', {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: toWaId,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        header: { type: 'image', image: { link: imageUrl } },
+        body: { text: bodyText.slice(0, 1024) },
+        action: {
+          buttons: buttons.slice(0, 3).map((b) => ({ type: 'reply', reply: { id: b.id, title: b.title.slice(0, 20) } })),
+        },
+      },
+    });
+  }
+
+  private async publishInstagramMedia(
+    igUserId: string,
+    params: Record<string, string>,
+    accessToken: string,
+    kind: 'story' | 'post',
+    opts: { pollIntervalMs?: number; maxPolls?: number },
+  ): Promise<string> {
     const pollIntervalMs = opts.pollIntervalMs ?? 3000;
     const maxPolls = opts.maxPolls ?? 20;
     const auth = { Authorization: `Bearer ${accessToken}` };
 
     const createUrl = new URL(graphUrl(`/${igUserId}/media`));
-    createUrl.searchParams.set('media_type', 'STORIES');
-    createUrl.searchParams.set('image_url', imageUrl);
+    for (const [k, v] of Object.entries(params)) createUrl.searchParams.set(k, v);
     const created = await this.graphJson(
       await fetch(createUrl, { method: 'POST', headers: auth }),
-      'create story container',
+      `create ${kind} container`,
     );
     const containerId = String(created.id);
 
@@ -475,23 +534,26 @@ export class MetaPublisherService {
       const status = await this.graphJson(await fetch(statusUrl, { headers: auth }), 'read container status');
       if (status.status_code === 'FINISHED') break;
       if (status.status_code === 'ERROR' || status.status_code === 'EXPIRED') {
-        throw new Error(`Instagram rejected the story image: ${status.status || status.status_code}`);
+        throw new Error(`Instagram rejected the ${kind} image: ${status.status || status.status_code}`);
       }
-      if (i === maxPolls - 1) throw new Error('Instagram did not finish processing the story in time');
+      if (i === maxPolls - 1) throw new Error(`Instagram did not finish processing the ${kind} in time`);
       await new Promise((r) => setTimeout(r, pollIntervalMs));
     }
 
     const publishUrl = new URL(graphUrl(`/${igUserId}/media_publish`));
     publishUrl.searchParams.set('creation_id', containerId);
-    const published = await this.graphJson(await fetch(publishUrl, { method: 'POST', headers: auth }), 'publish story');
+    const published = await this.graphJson(
+      await fetch(publishUrl, { method: 'POST', headers: auth }),
+      `publish ${kind}`,
+    );
     return String(published.id);
   }
 
-  private async graphJson(res: Response, step: string): Promise<any> {
+  private async graphJson(res: Response, step: string, platform = 'Instagram'): Promise<any> {
     const json: any = await res.json().catch(() => ({}));
     if (!res.ok || json?.error) {
       const message = json?.error?.error_user_msg || json?.error?.message || `HTTP ${res.status}`;
-      throw new Error(`Instagram ${step} failed: ${message}`);
+      throw new Error(`${platform} ${step} failed: ${message}`);
     }
     return json;
   }
