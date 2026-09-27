@@ -185,6 +185,35 @@ describe('ReplyEngineService', () => {
     expect(out?.offering_ids).toEqual(['o1']);
   });
 
+  it('pauses the chat for a day when the AI hands it to a person', async () => {
+    const { engine, prisma } = make({
+      private_dm: 'Team aapse baat karegi',
+      requires_human_attention: true,
+      action: 'HANDOFF',
+      handoff_reason: 'complaint',
+    });
+    await engine.reply({ ...req, eventType: 'dm' });
+    const saved = prisma.conversation.update.mock.calls[0][0].data.goalState;
+    expect(saved.handedOffUntil).toBeTruthy();
+  });
+
+  it('does not pause the chat when the AI failed for a technical reason', async () => {
+    for (const ai of [
+      { private_dm: null, requires_human_attention: true, intent: 'ai_unavailable' },
+      {
+        private_dm: 'queued',
+        requires_human_attention: true,
+        action: 'HANDOFF',
+        handoff_reason: 'generation_unavailable',
+      },
+    ]) {
+      const { engine, prisma } = make(ai);
+      await engine.reply({ ...req, eventType: 'dm' });
+      const saved = prisma.conversation.update.mock.calls[0][0].data.goalState;
+      expect(saved.handedOffUntil).toBeUndefined();
+    }
+  });
+
   it('says nothing when the seller has taken over the chat', async () => {
     const { engine } = make({}, { aiEnabled: false, goalState: null });
     expect(await engine.reply(req)).toBeNull();
