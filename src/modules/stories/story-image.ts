@@ -14,6 +14,21 @@ export async function toStoryJpeg(image: Buffer): Promise<Buffer> {
     .toBuffer();
 }
 
+export const FEED_WIDTH = 1080;
+export const FEED_HEIGHT = 1350;
+
+/**
+ * Feed posts must be between 4:5 and 1.91:1, so the 9:16 story is cropped to
+ * 4:5 around its centre, where the image prompt keeps the subject.
+ */
+export async function toFeedJpeg(image: Buffer): Promise<Buffer> {
+  return sharp(image)
+    .rotate()
+    .resize(FEED_WIDTH, FEED_HEIGHT, { fit: 'cover', position: 'centre' })
+    .jpeg({ quality: 85, mozjpeg: true })
+    .toBuffer();
+}
+
 /**
  * Used when the image model cannot letter the text itself: draws the headline
  * and hashtags on translucent bands with an SVG overlay.

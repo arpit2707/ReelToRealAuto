@@ -141,7 +141,7 @@ export class WebhookService {
         // merchant channel, so route them before the channel lookup below.
         const messages: any[] = [];
         for (const msg of change.value.messages || []) {
-          if (!this.stories.isStoryReply(msg, phoneNumberId)) {
+          if (!(await this.stories.isStoryReply(msg, phoneNumberId))) {
             messages.push(msg);
             continue;
           }
