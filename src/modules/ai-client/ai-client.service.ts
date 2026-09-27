@@ -50,7 +50,8 @@ export interface GeneratedReplyResult {
   action?: ReplyAction | null;
   offering_ids?: string[] | null;
   collected_fields?: Record<string, string> | null;
-  // Why the AI service handed the chat over, e.g. generation_unavailable.
+  // Why the AI handed over: human_request, complaint, order_support,
+  // purchase_assistance, missing_information, generation_unavailable, …
   handoff_reason?: string | null;
 }
 

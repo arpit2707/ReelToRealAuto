@@ -40,14 +40,15 @@ export type ReplyOutcome = GeneratedReplyResult & {
 
 const HANDOFF_PAUSE_MS = 24 * 60 * 60 * 1000;
 
-// The AI could not answer for a technical reason (service down, model error).
-// That is no reason to keep the chat silent for a day; the next message retries.
-function technicalFailure(outcome: GeneratedReplyResult): boolean {
-  return (
-    outcome.intent === 'ai_unavailable' ||
-    outcome.handoff_reason === 'generation_unavailable'
-  );
-}
+// Only these hand the chat to a person for a day. Anything else the AI could
+// not answer (a price not in the catalog, a model hiccup) gets the "team will
+// reply" message, but the next customer message is answered normally again.
+const PAUSING_REASONS = [
+  'human_request',
+  'complaint',
+  'order_support',
+  'purchase_assistance',
+];
 
 const SAFE_DM =
   'Thank you! Iski exact price aur details hamari team aapko thodi der me bhej degi.';
@@ -211,7 +212,9 @@ export class ReplyEngineService {
         ? outcome.offering_ids
         : previous.offeringIds,
       fields: { ...(previous.fields || {}), ...collected },
-      ...(outcome.action === 'HANDOFF' && !technicalFailure(outcome)
+      ...(outcome.action === 'HANDOFF' &&
+      !outcome.guarded &&
+      PAUSING_REASONS.includes(outcome.handoff_reason || '')
         ? {
             handedOffUntil: new Date(
               Date.now() + HANDOFF_PAUSE_MS,
