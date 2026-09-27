@@ -141,6 +141,7 @@ export class ReplyEngineService {
       offerings: ctx.offerings,
       goal_state: ctx.goal_state as Record<string, unknown>,
       recent_messages: ctx.recent_messages,
+      resume_if_pending: true,
     });
 
     const outcome: ReplyOutcome = {
