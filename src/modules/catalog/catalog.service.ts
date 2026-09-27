@@ -14,6 +14,13 @@ import {
   industryOf,
 } from './industries';
 import { parseCsv } from './csv';
+import {
+  LANGUAGES,
+  SERVICES,
+  TONES,
+  missingForOnboarding,
+  onboardingStatus,
+} from './onboarding';
 
 const SHOPIFY_API_VERSION = '2024-10';
 
@@ -56,6 +63,12 @@ export type ProfileInput = {
   faqs?: Array<{ q: string; a: string }> | null;
   alertPhone?: string | null;
   autoTagPosts?: boolean;
+  audience?: string | null;
+  tone?: string | null;
+  language?: string | null;
+  services?: string[];
+  // True finishes setup and switches the chosen automations on.
+  completeOnboarding?: boolean;
 };
 
 const OFFERING_INCLUDE = {
@@ -89,6 +102,8 @@ export class CatalogService {
         autoTagPosts: true,
       },
       template: industryOf(profile?.industry),
+      onboarding: onboardingStatus(profile),
+      services: SERVICES,
       industries: Object.values(INDUSTRIES).map((i) => ({
         code: i.code,
         label: i.label,
@@ -121,11 +136,47 @@ export class CatalogService {
           ? undefined
           : normalizePhone(input.alertPhone),
       autoTagPosts: input.autoTagPosts,
+      audience: input.audience,
+      tone: input.tone,
+      language: input.language,
+      services: input.services,
     };
+    if (input.tone && !TONES.includes(input.tone)) {
+      throw new BadRequestException(`Unknown tone ${input.tone}`);
+    }
+    if (input.language && !LANGUAGES.includes(input.language)) {
+      throw new BadRequestException(`Unknown language ${input.language}`);
+    }
+    const unknown = (input.services || []).filter(
+      (c) => !SERVICES.some((s) => s.code === c),
+    );
+    if (unknown.length) {
+      throw new BadRequestException(`Unknown service ${unknown.join(', ')}`);
+    }
+    if (input.completeOnboarding) {
+      const existing = await this.prisma.businessProfile.findUnique({
+        where: { orgId },
+      });
+      const missing = missingForOnboarding({
+        industry: input.industry ?? existing?.industry,
+        description: input.description ?? existing?.description,
+      });
+      if (missing.length) {
+        throw new BadRequestException(
+          `Tell us more before switching on automation: ${missing.join(', ')}`,
+        );
+      }
+    }
+    const onboardedAt = input.completeOnboarding ? new Date() : undefined;
     await this.prisma.businessProfile.upsert({
       where: { orgId },
-      update: data,
-      create: { orgId, ...data, industry: input.industry || 'APPAREL' },
+      update: { ...data, ...(onboardedAt ? { onboardedAt } : {}) },
+      create: {
+        orgId,
+        ...data,
+        industry: input.industry || 'APPAREL',
+        onboardedAt,
+      },
     });
     return this.getProfile(orgId);
   }

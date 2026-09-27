@@ -8,6 +8,7 @@ import {
 import { ReplyContextService, type GoalState } from './reply-context.service';
 import { LeadsService } from './leads.service';
 import { unknownPrices } from './price-guard';
+import { replyBlockedReason, serviceFor, TONES, LANGUAGES } from './onboarding';
 
 export type ReplyRequest = {
   orgId: string;
@@ -35,6 +36,19 @@ const SAFE_DM =
   'Thank you! Iski exact price aur details hamari team aapko thodi der me bhej degi.';
 const SAFE_PUBLIC = 'Thank you! Details DM me bhej di hain.';
 
+// The catalog prompt reads only custom_instructions for style, so the setup
+// answers are spelled out there as well.
+function styleNotes(
+  p: { audience?: string | null; tone?: string | null; language?: string | null } | null,
+): string | null {
+  const notes: string[] = [];
+  if (p?.audience) notes.push(`Customers are mostly: ${p.audience}.`);
+  if (p?.tone) notes.push(`Tone: ${p.tone.replace('_', ' ')}.`);
+  if (p?.language && p.language !== 'auto')
+    notes.push(`Prefer ${p.language} unless the customer writes otherwise.`);
+  return notes.length ? notes.join(' ') : null;
+}
+
 /**
  * Every automated reply goes through here: it builds the catalog context, asks
  * the AI service, refuses any price that is not in the catalog, remembers what
@@ -51,7 +65,27 @@ export class ReplyEngineService {
     private readonly leads: LeadsService,
   ) {}
 
-  async reply(req: ReplyRequest): Promise<ReplyOutcome | null> {
+  async reply(
+    req: ReplyRequest,
+    opts: { preview?: boolean } = {},
+  ): Promise<ReplyOutcome | null> {
+    // Nothing goes out until the seller has told us what the page is about
+    // and switched this automation on. A preview only shows what would be
+    // said, so it works before setup too.
+    const profile = await this.prisma.businessProfile.findUnique({
+      where: { orgId: req.orgId },
+    });
+    const blocked = replyBlockedReason(
+      profile,
+      serviceFor(req.platform, req.eventType),
+    );
+    if (blocked && !opts.preview) {
+      this.logger.log(
+        `No automated ${req.platform} ${req.eventType} reply for org ${req.orgId}: ${blocked}`,
+      );
+      return null;
+    }
+
     if (req.conversationId) {
       const convo = await this.prisma.conversation.findUnique({
         where: { id: req.conversationId },
@@ -82,7 +116,18 @@ export class ReplyEngineService {
       message_text: req.text,
       sender_id: req.senderId,
       ...(req.postId ? { post_context: { post_id: req.postId } } : {}),
-      brand_persona: { brand_name: req.brandName },
+      brand_persona: {
+        brand_name: req.brandName,
+        ...(profile?.tone && TONES.includes(profile.tone)
+          ? { tone: profile.tone }
+          : {}),
+        ...(profile?.language && LANGUAGES.includes(profile.language)
+          ? { language_mode: profile.language }
+          : {}),
+        ...(styleNotes(profile)
+          ? { custom_instructions: styleNotes(profile) }
+          : {}),
+      },
       business: ctx.business,
       playbook: ctx.playbook,
       offerings: ctx.offerings,

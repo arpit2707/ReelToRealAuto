@@ -112,8 +112,17 @@ describe('ReplyEngineService', () => {
     allowed_prices: [18000],
   };
 
-  function make(ai: any, convo: any = { aiEnabled: true, goalState: null }) {
+  function make(
+    ai: any,
+    convo: any = { aiEnabled: true, goalState: null },
+    profile: any = {
+      industry: 'BEAUTY_SERVICE',
+      onboardedAt: new Date(),
+      services: ['DM_REPLY', 'COMMENT_REPLY', 'WHATSAPP_REPLY'],
+    },
+  ) {
     const prisma: any = {
+      businessProfile: { findUnique: jest.fn().mockResolvedValue(profile) },
       conversation: {
         findUnique: jest.fn().mockResolvedValue(convo),
         update: jest.fn().mockResolvedValue({}),
@@ -174,6 +183,40 @@ describe('ReplyEngineService', () => {
   it('says nothing when the seller has taken over the chat', async () => {
     const { engine } = make({}, { aiEnabled: false, goalState: null });
     expect(await engine.reply(req)).toBeNull();
+  });
+
+  it('stays silent until the seller finishes setup', async () => {
+    const ai = { private_dm: 'hi', public_reply: 'hi' };
+    const { engine } = make(ai, undefined, null);
+    expect(await engine.reply(req)).toBeNull();
+    const pending = make(ai, undefined, {
+      industry: 'APPAREL',
+      onboardedAt: null,
+      services: ['COMMENT_REPLY'],
+    });
+    expect(await pending.engine.reply(req)).toBeNull();
+    // A preview still shows what the AI would say.
+    expect(await engine.reply(req, { preview: true })).not.toBeNull();
+  });
+
+  it('answers only the automations the seller switched on', async () => {
+    const ai = {
+      private_dm: 'Details DM me',
+      public_reply: 'DM check karo',
+      intent: 'x',
+      sentiment: 'neutral',
+      requires_human_attention: false,
+    };
+    const { engine } = make(ai, undefined, {
+      industry: 'APPAREL',
+      onboardedAt: new Date(),
+      services: ['DM_REPLY'],
+    });
+    expect(await engine.reply(req)).toBeNull();
+    expect(await engine.reply({ ...req, eventType: 'dm' })).not.toBeNull();
+    expect(
+      await engine.reply({ ...req, platform: 'WHATSAPP', eventType: 'dm' }),
+    ).toBeNull();
   });
 
   it('creates a complete lead once every required detail is in', async () => {
