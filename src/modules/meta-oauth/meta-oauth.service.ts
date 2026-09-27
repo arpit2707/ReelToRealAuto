@@ -1,4 +1,5 @@
 import { ConflictException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 
@@ -244,6 +245,7 @@ export class MetaOAuthService implements OnModuleInit {
         metadata: payload.metadata,
         isActive: true,
         status: 'ACTIVE',
+        lastError: Prisma.DbNull,
         orgId: cleanOrgId,
       },
       create: {
@@ -263,7 +265,7 @@ export class MetaOAuthService implements OnModuleInit {
 
   async listChannels(orgId: string) {
     const channels = await this.prisma.channel.findMany({
-      where: { orgId },
+      where: { orgId, status: { not: 'DISCONNECTED' } },
       orderBy: { createdAt: 'desc' },
     });
     return channels.map((c) => ({

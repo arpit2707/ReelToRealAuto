@@ -483,24 +483,40 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
     if (this.healthTimer) clearInterval(this.healthTimer);
   }
 
+  // A missing channel used to throw 401, which the web app treats as an expired
+  // session and logs the user out. It is a 404, and disconnecting twice (double
+  // click, stale tab) is a no-op rather than an error.
   async disconnect(orgId: string, channelId: string) {
-    const channel = await this.prisma.channel.findFirst({
-      where: { id: channelId, orgId },
-    });
+    const channel = await this.prisma.channel.findFirst({ where: { id: channelId, orgId } });
     if (!channel) throw new NotFoundException('Channel not found');
+    if (channel.status === 'DISCONNECTED' && !channel.isActive) {
+      return { ok: true, status: 'DISCONNECTED' };
+    }
     await this.unsubscribe(channel);
-    const wiped = this.crypto.encrypt('REVOKED');
     await this.prisma.channel.update({
       where: { id: channel.id },
       data: {
-        accessTokenEncrypted: wiped,
+        accessTokenEncrypted: this.crypto.encrypt('REVOKED'),
         isActive: false,
         status: 'DISCONNECTED',
         subscribedFields: [],
-        lastError: { reason: 'user_disconnect' },
+        lastError: { reason: 'user_disconnect', at: new Date().toISOString() },
       },
     });
+    if (channel.connectionId) await this.revokeConnectionIfUnused(channel.connectionId);
     return { ok: true, status: 'DISCONNECTED' };
+  }
+
+  // The OAuth user token stays on the MetaConnection so more assets can be
+  // picked later. Once its last channel is gone nothing needs it, and the data
+  // deletion page promises tokens are purged on disconnect.
+  private async revokeConnectionIfUnused(connectionId: string) {
+    const remaining = await this.prisma.channel.count({ where: { connectionId, isActive: true } });
+    if (remaining > 0) return;
+    await this.prisma.metaConnection.updateMany({
+      where: { id: connectionId },
+      data: { status: 'REVOKED', userTokenEncrypted: this.crypto.encrypt('REVOKED') },
+    });
   }
 
   async disconnectByMetaUserId(metaUserId: string) {
@@ -516,6 +532,7 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
             accessTokenEncrypted: this.crypto.encrypt('REVOKED'),
             isActive: false,
             status: 'DISCONNECTED',
+            subscribedFields: [],
             lastError: { reason: 'meta_deauthorize', metaUserId },
           },
         });
@@ -576,17 +593,47 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async unsubscribe(channel: { platform: string; channelIdentifier: string; accessTokenEncrypted: string }) {
+  // Webhook subscriptions live on the Page (Facebook and Instagram) or the WABA
+  // (WhatsApp), never on the Instagram account or the phone number id. A Page
+  // subscription is shared by the Page's Facebook channel and its Instagram
+  // channel, and a WABA by all of its numbers, so it is only removed once no
+  // other active channel still relies on it.
+  private subscriptionTarget(channel: { platform: string; channelIdentifier: string; metadata: unknown }) {
+    const meta = (channel.metadata || {}) as { pageId?: string; wabaId?: string };
+    if (channel.platform === 'INSTAGRAM') return meta.pageId || null;
+    if (channel.platform === 'WHATSAPP') return meta.wabaId || null;
+    return channel.channelIdentifier;
+  }
+
+  private async unsubscribe(channel: {
+    id: string;
+    platform: string;
+    channelIdentifier: string;
+    accessTokenEncrypted: string;
+    metadata: unknown;
+  }) {
+    const target = this.subscriptionTarget(channel);
+    if (!target) return;
     try {
+      const siblings = await this.prisma.channel.findMany({
+        where: {
+          id: { not: channel.id },
+          isActive: true,
+          platform: { in: channel.platform === 'WHATSAPP' ? ['WHATSAPP'] : ['FACEBOOK', 'INSTAGRAM'] },
+        },
+        select: { platform: true, channelIdentifier: true, metadata: true },
+      });
+      if (siblings.some((s) => this.subscriptionTarget(s) === target)) return;
+
       const token = this.crypto.decrypt(channel.accessTokenEncrypted);
       if (!token || token === 'REVOKED') return;
-      await fetch(graphUrl(`/${channel.channelIdentifier}/subscribed_apps`), {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ access_token: token }),
-      });
+      const url = new URL(graphUrl(`/${target}/subscribed_apps`));
+      url.searchParams.set('access_token', token);
+      url.searchParams.set('appsecret_proof', appsecretProof(token, this.appSecret()));
+      const res = await fetch(url, { method: 'DELETE' });
+      if (!res.ok) this.logger.warn(`unsubscribe failed for ${target}: ${await res.text()}`);
     } catch (err: any) {
-      this.logger.warn(`unsubscribe failed for ${channel.channelIdentifier}: ${err.message}`);
+      this.logger.warn(`unsubscribe failed for ${target}: ${err.message}`);
     }
   }
 }
