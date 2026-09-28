@@ -3,6 +3,7 @@ import * as crypto from 'crypto';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../../prisma/prisma.service';
 import { hashOpaqueToken, signAuthToken, type JwtPayload } from './jwt';
+import { isSuperAdmin, isSuperAdminEmail } from './superadmin';
 
 @Injectable()
 export class AuthService {
@@ -94,6 +95,9 @@ export class AuthService {
       orgId: member.orgId,
       orgName: member.org.name,
       role: member.role,
+      // The dashboard shows the superadmin link and the "logged in as" banner.
+      isSuperAdmin: isSuperAdmin(payload),
+      impersonatedBy: payload.imp && isSuperAdminEmail(payload.imp.email) ? payload.imp.email : null,
       channels: channels.map((c) => ({
         id: c.id,
         platform: c.platform,

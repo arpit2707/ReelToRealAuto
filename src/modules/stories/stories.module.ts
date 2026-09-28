@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AiProvidersModule } from '../ai-providers/ai-providers.module';
 import { CryptoModule } from '../crypto/crypto.module';
 import { MetaPublisherModule } from '../meta-publisher/meta-publisher.module';
 import { RolesGuard } from '../auth/auth.guard';
@@ -9,7 +10,7 @@ import { KeywordResearchService } from './keyword-research.service';
 import { MediaStore } from './media-store';
 
 @Module({
-  imports: [CryptoModule, MetaPublisherModule],
+  imports: [AiProvidersModule, CryptoModule, MetaPublisherModule],
   controllers: [StoriesController],
   providers: [
     StoriesService,

@@ -126,9 +126,9 @@ function makeService(settingsOver: any = {}) {
     publishFacebookPhoto: jest.fn().mockResolvedValue('fb99'),
   };
   const gemini: any = {
-    isConfigured: () => true,
+    isConfigured: async () => true,
     trendKeywords: jest.fn().mockResolvedValue(['hd bridal makeup', 'wedding season looks']),
-    generateIdeas: jest.fn(async (_ctx: any, count: number) =>
+    generateIdeas: jest.fn(async (_org: string, _ctx: any, count: number) =>
       Array.from({ length: count }, (_, i) => ({
         title: `T${i + 1}`,
         label: i === 0 ? '' : `Trending ${i + 1}`,
@@ -197,12 +197,12 @@ describe('StoriesService', () => {
 
       expect(batch.status).toBe('NOTIFIED');
       expect(keywords.apifyHashtags).toHaveBeenCalledWith('bridal makeup');
-      expect(gemini.trendKeywords.mock.calls[0][0].trendingHashtags).toEqual(['#weddingseason', '#bridalmakeup']);
+      expect(gemini.trendKeywords.mock.calls[0][1].trendingHashtags).toEqual(['#weddingseason', '#bridalmakeup']);
       expect(prisma.storyBatch.update).toHaveBeenCalledWith({
         where: { id: 'b1' },
         data: { trendKeywords: ['hd bridal makeup', 'wedding season looks'] },
       });
-      const [ctx, count] = gemini.generateIdeas.mock.calls[0];
+      const [, ctx, count] = gemini.generateIdeas.mock.calls[0];
       expect(count).toBe(5);
       expect(ctx.trendKeywords).toEqual(['hd bridal makeup', 'wedding season looks']);
       expect(prisma.storyOption.create).toHaveBeenCalledTimes(5);
@@ -227,7 +227,7 @@ describe('StoriesService', () => {
       await service.generateBatch('org1');
 
       // Seller seed and the industry name collapse into one seed.
-      expect(gemini.generateIdeas.mock.calls[0][0].trendKeywords).toEqual(['bridal makeup']);
+      expect(gemini.generateIdeas.mock.calls[0][1].trendKeywords).toEqual(['bridal makeup']);
     });
 
     it('keeps an existing batch for today', async () => {
@@ -517,7 +517,7 @@ describe('StoriesService', () => {
         where: { id: 'b1', editingOptionId: 'o2' },
         data: { editingOptionId: null, editingMode: null, editingStartedAt: null },
       });
-      expect(gemini.editImage).toHaveBeenCalledWith(expect.any(Buffer), 'image/jpeg', 'background golden karo');
+      expect(gemini.editImage).toHaveBeenCalledWith(expect.any(String), expect.any(Buffer), 'image/jpeg', 'background golden karo');
       expect(prisma.storyOption.update.mock.calls[0][0].data).toMatchObject({
         finalImageData: null,
         revision: { increment: 1 },
@@ -557,7 +557,7 @@ describe('StoriesService', () => {
 
       expect(await service.publishBatch('b1')).toBe(true);
 
-      expect(gemini.addTextToImage).toHaveBeenCalledWith(expect.any(Buffer), 'image/jpeg', 'Bridal glow', [
+      expect(gemini.addTextToImage).toHaveBeenCalledWith('org1', expect.any(Buffer), 'image/jpeg', 'Bridal glow', [
         '#bridalmakeup',
         '#hdmakeup',
       ]);
@@ -726,7 +726,7 @@ describe('StoriesService (scheduling and own posts)', () => {
   it('keeps the catalog item an idea promotes, but only a real one', async () => {
     const { service, prisma, gemini } = makeService();
     prisma.offering.findMany.mockResolvedValue([{ id: 'off1', title: 'Bridal HD', priceMin: 18000, currency: 'INR' }]);
-    gemini.generateIdeas.mockImplementation(async (_ctx: any, count: number) =>
+    gemini.generateIdeas.mockImplementation(async (_org: string, _ctx: any, count: number) =>
       Array.from({ length: count }, (_, i) => ({
         title: `T${i}`,
         label: 'L',
@@ -741,7 +741,7 @@ describe('StoriesService (scheduling and own posts)', () => {
     const created = prisma.storyOption.create.mock.calls.map((c: any) => c[0].data.offeringId);
     expect(created[0]).toBe('off1');
     expect(created.slice(1).every((id: any) => id === null)).toBe(true);
-    expect(gemini.generateIdeas.mock.calls[0][0].products[0].id).toBe('off1');
+    expect(gemini.generateIdeas.mock.calls[0][1].products[0].id).toBe('off1');
   });
 
   it('writes ideas in the tone and for the audience from business setup', async () => {
@@ -754,12 +754,12 @@ describe('StoriesService (scheduling and own posts)', () => {
       audience: 'Brides in Bihar',
     });
     await service.generateBatch('org1');
-    expect(gemini.generateIdeas.mock.calls[0][0].persona).toEqual({
+    expect(gemini.generateIdeas.mock.calls[0][1].persona).toEqual({
       tone: 'playful',
       language: 'hinglish',
       audience: 'Brides in Bihar',
     });
-    expect(gemini.generateIdeas.mock.calls[0][0].description).toBe('Bridal makeup in Patna');
+    expect(gemini.generateIdeas.mock.calls[0][1].description).toBe('Bridal makeup in Patna');
   });
 
   describe('reminders', () => {
@@ -831,7 +831,7 @@ describe('StoriesService (scheduling and own posts)', () => {
       });
 
       expect(meta.downloadWhatsAppMedia).toHaveBeenCalledWith('media1', 'platform-token');
-      expect(gemini.describeOwnPhoto.mock.calls[0][1].sellerCaption).toBe('Naya lehenga aa gaya!');
+      expect(gemini.describeOwnPhoto.mock.calls[0][2].sellerCaption).toBe('Naya lehenga aa gaya!');
       expect(prisma.storyBatch.create.mock.calls[0][0].data).toMatchObject({
         kind: 'OWN',
         status: 'AWAITING_PICK',

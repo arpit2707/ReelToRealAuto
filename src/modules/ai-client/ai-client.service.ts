@@ -1,4 +1,5 @@
-﻿import { Injectable, Logger } from '@nestjs/common';
+﻿import { Injectable, Logger, Optional } from '@nestjs/common';
+import { AiProviderService } from '../ai-providers/ai-provider.service';
 
 export interface GenerateReplyPayload {
   brand_id: string;
@@ -45,6 +46,9 @@ export interface GenerateReplyPayload {
   // We only call when this chat should get an AI answer (our own hand-off
   // pause is over or the seller pressed Resume), so reopen it on the AI side.
   resume_if_pending?: boolean;
+  // The provider, key and model chosen for DM replies (superadmin or workspace).
+  // Left out when the AI service's own Gemini key should answer, as before.
+  llm?: { provider: 'OPENAI' | 'GEMINI' | 'CLAUDE'; api_key: string; model: string };
 }
 
 // SEND_LINK: shared a price and link. ASK_FIELD: asked for a missing lead
@@ -75,9 +79,27 @@ export class AiClientService {
   private readonly logger = new Logger(AiClientService.name);
   private readonly aiServiceUrl = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000/api/v1/generate-reply';
 
-  async generateReply(payload: GenerateReplyPayload): Promise<GeneratedReplyResult> {
+  constructor(@Optional() private readonly providers?: AiProviderService) {}
+
+  private async withProvider(payload: GenerateReplyPayload): Promise<GenerateReplyPayload> {
+    if (!this.providers || !payload.brand_id || payload.llm) return payload;
     try {
-      this.logger.log(`Invoking Personalised-AI for sender ${payload.sender_id} on ${payload.channel_type}`);
+      const ai = await this.providers.resolve(payload.brand_id, 'DM_REPLIES');
+      if (!ai || (ai.source === 'ENV' && ai.provider === 'GEMINI')) return payload;
+      return { ...payload, llm: { provider: ai.provider, api_key: ai.apiKey, model: ai.model } };
+    } catch (e: any) {
+      this.logger.warn(`AI provider lookup failed, using the AI service default: ${e.message}`);
+      return payload;
+    }
+  }
+
+  async generateReply(input: GenerateReplyPayload): Promise<GeneratedReplyResult> {
+    try {
+      const payload = await this.withProvider(input);
+      this.logger.log(
+        `Invoking Personalised-AI for sender ${payload.sender_id} on ${payload.channel_type}` +
+          (payload.llm ? ` via ${payload.llm.provider}` : ''),
+      );
       const response = await fetch(this.aiServiceUrl, {
         method: 'POST',
         headers: {

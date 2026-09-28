@@ -76,11 +76,11 @@ describe('Gemini helpers', () => {
 
   it('asks for trend keywords using the Apify hashtags and dedupes the answer', async () => {
     const { GeminiClient } = await import('./gemini.client');
-    const client = new GeminiClient();
+    const client = new GeminiClient({} as any, {} as any);
     const spy = jest
       .spyOn(client, 'generateJson')
       .mockResolvedValue(['Bridal Makeup ', 'bridal makeup', 'hd bridal base'] as any);
-    const out = await client.trendKeywords({
+    const out = await client.trendKeywords('org1', {
       industry: 'BRIDAL_MAKEUP',
       description: 'Bridal makeup artist in Patna',
       seeds: ['bridal makeup'],
@@ -88,6 +88,6 @@ describe('Gemini helpers', () => {
       forDate: '2026-11-01',
     });
     expect(out).toEqual(['bridal makeup', 'hd bridal base']);
-    expect(spy.mock.calls[0][0]).toContain('#weddingseason');
+    expect(spy.mock.calls[0][2]).toContain('#weddingseason');
   });
 });

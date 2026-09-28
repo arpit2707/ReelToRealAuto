@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { verifyAuthToken } from './jwt';
+import { isSuperAdminEmail } from './superadmin';
 
 export const ROLES_KEY = 'roles';
 export const Roles = (...roles: string[]) => SetMetadata(ROLES_KEY, roles);
@@ -20,12 +21,18 @@ export class JwtAuthGuard implements CanActivate {
     if (!header.startsWith('Bearer ')) {
       throw new UnauthorizedException('Login required');
     }
+    let user;
     try {
-      req.user = verifyAuthToken(header.slice(7));
-      return true;
+      user = verifyAuthToken(header.slice(7));
     } catch {
       throw new UnauthorizedException('Invalid or expired session');
     }
+    // A "login as user" session ends as soon as its superadmin loses the role.
+    if (user.imp && !isSuperAdminEmail(user.imp.email)) {
+      throw new UnauthorizedException('Superadmin session ended');
+    }
+    req.user = user;
+    return true;
   }
 }
 

@@ -161,13 +161,13 @@ function makeService(settingsOver: any = {}, store?: any) {
     publishFacebookPhoto: jest.fn().mockResolvedValue('fb1'),
   };
   const gemini: any = {
-    isConfigured: () => true,
+    isConfigured: async () => true,
     trendKeywords: jest.fn().mockResolvedValue(['hd bridal makeup']),
-    generateIdeas: jest.fn(async (_ctx: any, count: number) =>
+    generateIdeas: jest.fn(async (_org: string, _ctx: any, count: number) =>
       IDEAS.slice(0, count).map((i) => ({ ...i, id: undefined, position: undefined })),
     ),
     generateImage: jest.fn().mockResolvedValue(Buffer.from('png')),
-    refinePost: jest.fn(async (idea: any, ctx: any) => ({
+    refinePost: jest.fn(async (_org: string, idea: any, ctx: any) => ({
       title: `${idea.title}!`,
       caption: `${idea.caption} (${ctx.note})`,
       imagePrompt: `${idea.imagePrompt} + ${ctx.note}`,
@@ -276,7 +276,7 @@ describe('text-first rounds', () => {
     ).toBeUndefined();
     expect(meta.sendWhatsAppTemplate).toHaveBeenCalled();
     // The brand kit reaches the ideas prompt.
-    expect(gemini.generateIdeas.mock.calls[0][0].brandKit).toMatchObject({
+    expect(gemini.generateIdeas.mock.calls[0][1].brandKit).toMatchObject({
       colors: ['#c2185b', '#ffd700'],
     });
   });
@@ -327,10 +327,10 @@ describe('text-first rounds', () => {
       ['IDEA', 'r1', 'red lehenga ke saath'],
     ]);
     expect(gemini.refinePost).toHaveBeenCalledTimes(1);
-    expect(gemini.generateImage.mock.calls[1][0]).toContain(
+    expect(gemini.generateImage.mock.calls[1][1]).toContain(
       'red lehenga ke saath',
     );
-    expect(gemini.generateImage.mock.calls[0][0]).toContain('#c2185b');
+    expect(gemini.generateImage.mock.calls[0][1]).toContain('#c2185b');
     const buttons = meta.sendWhatsAppImageButtons.mock.calls[0][4];
     expect(buttons.map((b: any) => b.title)).toEqual(['Post', 'Story', 'Edit']);
     expect(buttons[0].id).toBe('STORY_ASPOST_post1_1');
@@ -603,6 +603,7 @@ describe('past-post insights', () => {
     prisma.socialPost.findMany.mockResolvedValue(posts);
     const saved = await service.ensureInsights('org1', 'Glow', MORNING);
     expect(gemini.analyzePosts).toHaveBeenCalledWith(
+      'org1',
       'Glow',
       expect.arrayContaining([
         expect.objectContaining({ caption: 'Post 1', likes: 1 }),
@@ -628,7 +629,7 @@ describe('object storage', () => {
     const objects = new Map<string, Buffer>();
     return {
       objects,
-      isConfigured: () => true,
+      isConfigured: async () => true,
       put: jest.fn(async (k: string, d: Buffer) => void objects.set(k, d)),
       get: jest.fn(async (k: string) => objects.get(k)!),
     };
