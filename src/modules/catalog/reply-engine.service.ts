@@ -8,6 +8,7 @@ import {
 import { ReplyContextService, type GoalState } from './reply-context.service';
 import { LeadsService } from './leads.service';
 import { PostTaggingService } from './post-tagging.service';
+import { PostAiGateService } from './post-ai-gate.service';
 import { unknownPrices } from './price-guard';
 import { CRISIS_PUBLIC, crisisReply, isCrisis, receivedReply } from './crisis';
 import {
@@ -106,6 +107,7 @@ export class ReplyEngineService {
     private readonly context: ReplyContextService,
     private readonly leads: LeadsService,
     @Optional() private readonly tagging?: PostTaggingService,
+    @Optional() private readonly gate?: PostAiGateService,
   ) {}
 
   /** Learns a new post's caption and item before replying to its first comments. */
@@ -160,6 +162,23 @@ export class ReplyEngineService {
     // (a day for a hand-off, 12 hours after a seller reply), so a chat nobody
     // picked up does not stay silent forever.
     if (chatPaused(convo)) return null;
+
+    // Comments are answered only on posts the seller switched the AI on for
+    // (decision 2). The dashboard preview can try any post.
+    if (
+      req.eventType === 'comment' &&
+      !isPreview &&
+      this.gate &&
+      !(await this.gate.isPostAiOn(req.orgId, req.postId))
+    ) {
+      this.logger.log(`No comment reply for org ${req.orgId}: AI is off for post ${req.postId}`);
+      // Still learn the post (and ask the seller about its item) in the background.
+      if (this.tagging && req.postId && req.channelId)
+        void this.tagging
+          .ensurePostContext(req.orgId, req.channelId, req.postId)
+          .catch((e) => this.logger.warn(`Post context for ${req.postId} failed: ${e.message}`));
+      return null;
+    }
 
     if (!isPreview) await this.ensurePostContext(req);
 

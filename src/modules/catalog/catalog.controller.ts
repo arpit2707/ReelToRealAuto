@@ -21,6 +21,7 @@ import {
 import { PostTaggingService } from './post-tagging.service';
 import { LeadsService } from './leads.service';
 import { ReplyEngineService } from './reply-engine.service';
+import { PostAiGateService } from './post-ai-gate.service';
 
 @Controller('api/catalog')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -29,6 +30,7 @@ export class CatalogController {
     private readonly catalog: CatalogService,
     private readonly tagging: PostTaggingService,
     private readonly engine: ReplyEngineService,
+    private readonly gate: PostAiGateService,
   ) {}
 
   @Get('profile')
@@ -128,9 +130,14 @@ export class CatalogController {
     return this.catalog.clearBlockedDate(user.orgId, id, date);
   }
 
+  // ai=on|off|untagged|needs_context narrows the list.
   @Get('post-tags')
-  postTags(@CurrentUser() user: JwtPayload, @Query('status') status?: string) {
-    return this.tagging.listLinks(user.orgId, status || undefined);
+  postTags(
+    @CurrentUser() user: JwtPayload,
+    @Query('status') status?: string,
+    @Query('ai') ai?: string,
+  ) {
+    return this.tagging.listLinks(user.orgId, status || undefined, ai || undefined);
   }
 
   @Post('post-tags/run')
@@ -164,6 +171,17 @@ export class CatalogController {
     @Body() body: { status: string },
   ) {
     return this.tagging.setStatus(user.orgId, id, body?.status);
+  }
+
+  /** The post's AI switch. Turning it on needs a confirmed item or a note. */
+  @Put('posts/:postId/ai')
+  @Roles('OWNER', 'ADMIN')
+  setPostAi(
+    @CurrentUser() user: JwtPayload,
+    @Param('postId') postId: string,
+    @Body() body: { enabled?: boolean },
+  ) {
+    return this.gate.setPostAi(user.orgId, postId, body?.enabled === true, user.sub);
   }
 
   @Put('posts/:postId/note')

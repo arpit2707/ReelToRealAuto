@@ -11,6 +11,7 @@ import { ReplyContextService } from './reply-context.service';
 import { ReplyEngineService } from './reply-engine.service';
 import { LeadsService } from './leads.service';
 import { PostTaggingService } from './post-tagging.service';
+import { PostAiGateService } from './post-ai-gate.service';
 
 @Module({
   imports: [
@@ -27,8 +28,9 @@ import { PostTaggingService } from './post-tagging.service';
     ReplyEngineService,
     LeadsService,
     PostTaggingService,
+    PostAiGateService,
     RolesGuard,
   ],
-  exports: [ReplyEngineService, CatalogService, PostTaggingService],
+  exports: [ReplyEngineService, CatalogService, PostTaggingService, PostAiGateService],
 })
 export class CatalogModule {}
