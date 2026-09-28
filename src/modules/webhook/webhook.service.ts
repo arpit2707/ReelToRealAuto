@@ -11,6 +11,8 @@ import { PostTaggingService } from '../catalog/post-tagging.service';
 import { hmacSha256Hex, timingSafeEqualString } from '../../common/hmac';
 import { CommentPipelineService } from './comment-pipeline.service';
 import { normalizeFacebook, normalizeInstagram } from './comments';
+import { describeAttachments, extractPostRef, normalizePermalink, type PostRef } from './post-ref';
+import { PostAiGateService } from '../catalog/post-ai-gate.service';
 
 @Injectable()
 export class WebhookService {
@@ -27,7 +29,66 @@ export class WebhookService {
     private readonly replies: ReplyEngineService,
     private readonly postTagging: PostTaggingService,
     @Optional() private readonly comments?: CommentPipelineService,
+    @Optional() private readonly gate?: PostAiGateService,
   ) {}
+
+  /** The post a DM refers to, by id or by its link. */
+  private async resolvePostRef(orgId: string, ref: PostRef | null): Promise<string | null> {
+    if (!ref) return null;
+    if (ref.postId) return ref.postId;
+    if (!ref.permalink) return null;
+    const post = await this.prisma.socialPost
+      .findFirst({
+        where: { orgId, permalink: { startsWith: normalizePermalink(ref.permalink) } },
+        select: { postId: true },
+      })
+      .catch(() => null);
+    return post?.postId || null;
+  }
+
+  /**
+   * Saves an Instagram / Messenger DM (with or without text) and works out
+   * what the AI should answer. Null means: saved, nothing to answer. A share
+   * or story reply without text is answered only when that post's AI is on.
+   */
+  private async prepareDm(input: {
+    platform: 'INSTAGRAM' | 'FACEBOOK';
+    orgId: string;
+    channelId: string;
+    senderId: string;
+    msg: any;
+    mid?: string;
+  }): Promise<{ conversationId: string; text: string; postId: string | null } | null> {
+    const typed: string | undefined = input.msg.message?.text || input.msg.postback?.title;
+    const ref = extractPostRef(input.msg);
+    const described = describeAttachments(input.msg);
+    if (!typed && !ref && !described) return null;
+    const conversation = await this.conversations.ingestInbound({
+      orgId: input.orgId,
+      channelId: input.channelId,
+      platform: input.platform,
+      peerId: input.senderId,
+      text: typed || described || '[Message]',
+      platformMessageId: input.mid,
+      ...(typed ? {} : { type: ref ? 'SHARE' : 'ATTACHMENT' }),
+    });
+    const postId = await this.resolvePostRef(input.orgId, ref);
+    if (postId && ref) {
+      await this.conversations
+        .markSource(conversation.id, postId, input.platform, ref.kind)
+        .catch((e) => this.logger.warn(`Could not record the chat's post: ${e.message}`));
+    }
+    if (!typed) {
+      const on = postId && this.gate ? await this.gate.isPostAiOn(input.orgId, postId) : false;
+      if (!on) return null;
+    }
+    return {
+      conversationId: conversation.id,
+      // The AI sees a shared post without words as a question about it.
+      text: typed || '(The customer shared this post without a message.)',
+      postId,
+    };
+  }
 
   verifyWebhook(mode: string, token: string, challenge: string): string | null {
     const verifyToken = process.env.META_VERIFY_TOKEN || '';
@@ -202,7 +263,22 @@ export class WebhookService {
             msg.interactive?.button_reply?.title ||
             msg.interactive?.list_reply?.title ||
             msg.button?.text;
-          if (!text || !fromWaId) continue;
+          if (!fromWaId) continue;
+          if (!text) {
+            // Photos, voice notes, locations: saved for the seller, not answered.
+            if (msg.type) {
+              await this.conversations.ingestInbound({
+                orgId: channel.orgId,
+                channelId: channel.id,
+                platform: 'WHATSAPP',
+                peerId: fromWaId,
+                text: `[${String(msg.type).replace(/^./, (c: string) => c.toUpperCase())}]`,
+                platformMessageId: msg.id,
+                type: 'ATTACHMENT',
+              });
+            }
+            continue;
+          }
 
           const conversation = await this.conversations.ingestInbound({
             orgId: channel.orgId,
@@ -385,18 +461,19 @@ export class WebhookService {
 
         const mid = msg.message?.mid;
         if (!(await this.claimEvent(mid, 'facebook_dm'))) continue;
+        if (!senderId) continue;
 
-        const text = msg.message?.text;
-        if (!text || !senderId) continue;
-
-        const conversation = await this.conversations.ingestInbound({
+        const dm = await this.prepareDm({
+          platform: 'FACEBOOK',
           orgId: channel.orgId,
           channelId: channel.id,
-          platform: 'FACEBOOK',
-          peerId: senderId,
-          text,
-          platformMessageId: mid,
+          senderId,
+          msg,
+          mid,
         });
+        if (!dm) continue;
+        const text = dm.text;
+        const conversation = { id: dm.conversationId };
 
         const aiResponse = await this.replies.reply({
           orgId: brandId,
@@ -405,6 +482,7 @@ export class WebhookService {
           eventType: 'dm',
           text,
           senderId,
+          postId: dm.postId,
           conversationId: conversation.id,
           channelId: channel.id,
         });
@@ -517,22 +595,24 @@ export class WebhookService {
       return;
     }
 
-    const text = messageData.message?.text;
     const senderId = messageData.sender?.id;
     if (senderId && senderId === igAccountId) return;
 
     const mid = messageData.message?.mid;
     if (!(await this.claimEvent(mid, 'instagram_dm'))) return;
-    if (!text || !senderId) return;
+    if (!senderId) return;
 
-    const conversation = await this.conversations.ingestInbound({
+    const dm = await this.prepareDm({
+      platform: 'INSTAGRAM',
       orgId,
       channelId,
-      platform: 'INSTAGRAM',
-      peerId: senderId,
-      text,
-      platformMessageId: mid,
+      senderId,
+      msg: messageData,
+      mid,
     });
+    if (!dm) return;
+    const text = dm.text;
+    const conversation = { id: dm.conversationId };
 
     this.logger.log(`Processing DM from [${senderId}] on Brand: ${brandName}`);
 
@@ -543,8 +623,8 @@ export class WebhookService {
       eventType: 'dm',
       text,
       senderId,
-      // A reply to a story or post carries the media it was about.
-      postId: messageData.message?.reply_to?.story?.id || messageData.message?.referral?.ads_context_data?.post_id || null,
+      // A story reply, shared post, ad or link carries the post it is about.
+      postId: dm.postId,
       conversationId: conversation.id,
       channelId,
     });

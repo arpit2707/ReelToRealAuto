@@ -18,6 +18,8 @@ export class ConversationService {
     name?: string;
     text: string;
     platformMessageId?: string;
+    // IMAGE, SHARE, ... for a message without text.
+    type?: string;
   }) {
     const contact = await this.prisma.inboxContact.upsert({
       where: {
@@ -69,6 +71,7 @@ export class ConversationService {
         conversationId: conversation.id,
         platformMessageId: input.platformMessageId,
         direction: 'INBOUND',
+        ...(input.type ? { type: input.type } : {}),
         body: input.text,
         sentBy: 'HUMAN',
         status: 'DELIVERED',
@@ -228,6 +231,14 @@ export class ConversationService {
         sourceKind: 'comment',
         goalState: goalState as Prisma.InputJsonValue,
       },
+    });
+  }
+
+  /** Records the post a chat started from, the first time one is known. */
+  async markSource(conversationId: string, postId: string, platform: string, kind: string) {
+    await this.prisma.conversation.updateMany({
+      where: { id: conversationId, sourcePostId: null },
+      data: { sourcePostId: postId, sourcePlatform: platform, sourceKind: kind },
     });
   }
 

@@ -192,6 +192,9 @@ export class ReplyEngineService {
       conversationId: req.conversationId,
       channelId: req.channelId,
     });
+    // The post the context settled on (AI-on posts only); older test doubles
+    // only carry `post`.
+    const postId = ctx.post_id !== undefined ? ctx.post_id : ctx.post?.post_id || null;
     // The page's own style when it has one, else the business profile's.
     const style = {
       audience: ctx.style?.audience ?? profile?.audience ?? null,
@@ -206,10 +209,10 @@ export class ReplyEngineService {
       event_type: req.eventType,
       message_text: req.text,
       sender_id: req.senderId,
-      ...(req.postId
+      ...(postId
         ? {
             post_context: {
-              post_id: req.postId,
+              post_id: postId,
               ...(ctx.post?.caption ? { caption: ctx.post.caption } : {}),
               ...(ctx.post?.note ? { note: ctx.post.note } : {}),
             },
@@ -292,7 +295,13 @@ export class ReplyEngineService {
     if (req.conversationId) {
       await this.remember(
         req,
-        ctx.goal_state,
+        {
+          ...ctx.goal_state,
+          // A post mentioned now starts (or restarts) the 7-day memory.
+          ...(postId && req.postId === postId
+            ? { postId, postAt: new Date().toISOString() }
+            : {}),
+        },
         ctx.playbook.lead_fields.map((f) => f.key),
         ctx.playbook.goal,
         outcome,
