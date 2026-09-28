@@ -11,7 +11,9 @@ import { MetaPublisherService } from '../meta-publisher/meta-publisher.service';
 import { ConversationService } from '../conversations/conversation.service';
 import { RealtimeService } from '../realtime/realtime.service';
 import type { JwtPayload } from '../auth/jwt';
-import { chatPaused } from '../catalog/reply-engine.service';
+import { chatPaused, PAUSING_REASONS } from '../catalog/reply-engine.service';
+import { POST_MEMORY_MS, type GoalState } from '../catalog/reply-context.service';
+import { priceLabel } from '../catalog/industries';
 
 // After the seller answers a chat themselves, the AI stays out of it this long.
 export const SELLER_REPLY_PAUSE_MS = 12 * 60 * 60 * 1000;
@@ -73,17 +75,103 @@ export class InboxService {
       orderBy: { lastInboundAt: { sort: 'desc', nulls: 'last' } },
       take: 100,
     });
-    return rows.map((c) => ({
-      id: c.id,
-      senderId: c.contact.platformUserId,
-      name: c.contact.name || c.contact.platformUserId,
-      preview: c.messages[0]?.body || '',
-      platform: c.channel.platform,
-      status: c.status,
-      lastAt: (c.lastInboundAt || c.updatedAt).toISOString(),
-      windowExpiresAt: c.windowExpiresAt,
-      aiPaused: aiPaused(c),
-    }));
+    const sources = await this.sources(orgId, rows);
+    return rows.map((c) => {
+      const state = (c.goalState as GoalState | null) || {};
+      const reason = state.handoffReason || null;
+      return {
+        id: c.id,
+        senderId: c.contact.platformUserId,
+        name: c.contact.name || c.contact.platformUserId,
+        preview: c.messages[0]?.body || '',
+        platform: c.channel.platform,
+        status: c.status,
+        lastAt: (c.lastInboundAt || c.updatedAt).toISOString(),
+        windowExpiresAt: c.windowExpiresAt,
+        aiPaused: aiPaused(c),
+        // Crisis, complaint, a person asked for, or a question the AI could
+        // not answer: cleared when the seller replies or resumes the AI.
+        needsYou: Boolean(reason && PAUSING_REASONS.includes(reason)),
+        handoffReason: reason,
+        pauseReason: pauseReason(c),
+        source: sources.get(c.id) || null,
+      };
+    });
+  }
+
+  /**
+   * The post each chat is about (its first comment, story reply, share or ad,
+   * or the post it talked about in the last 7 days): thumbnail and items.
+   */
+  private async sources(
+    orgId: string,
+    rows: Array<{
+      id: string;
+      goalState: unknown;
+      sourcePostId?: string | null;
+      sourcePlatform?: string | null;
+      sourceKind?: string | null;
+    }>,
+  ) {
+    const now = Date.now();
+    const picked = new Map<string, { postId: string; kind: string | null; platform: string | null }>();
+    for (const c of rows) {
+      const s = (c.goalState as GoalState | null) || {};
+      const fresh = s.postId && s.postAt && now - new Date(s.postAt).getTime() < POST_MEMORY_MS;
+      const postId = fresh ? s.postId : c.sourcePostId;
+      if (postId)
+        picked.set(c.id, {
+          postId,
+          kind: postId === c.sourcePostId ? c.sourceKind || null : null,
+          platform: c.sourcePlatform || null,
+        });
+    }
+    const ids = [...new Set([...picked.values()].map((p) => p.postId))];
+    if (!ids.length) return new Map();
+    const [posts, links] = await Promise.all([
+      this.prisma.socialPost.findMany({
+        where: { orgId, postId: { in: ids } },
+        select: { postId: true, caption: true, mediaUrl: true, permalink: true, platform: true },
+      }),
+      this.prisma.postOfferingLink.findMany({
+        where: { orgId, postId: { in: ids }, status: 'SELLER_CONFIRMED' },
+        select: {
+          postId: true,
+          mediaUrl: true,
+          permalink: true,
+          caption: true,
+          offering: {
+            select: {
+              id: true,
+              title: true,
+              priceMode: true,
+              priceMin: true,
+              priceMax: true,
+              currency: true,
+              isActive: true,
+            },
+          },
+        },
+      }),
+    ]);
+    const post = new Map(posts.map((p) => [p.postId, p]));
+    const out = new Map<string, Record<string, unknown>>();
+    for (const [conversationId, ref] of picked) {
+      const sp = post.get(ref.postId);
+      const own = links.filter((l) => l.postId === ref.postId);
+      out.set(conversationId, {
+        postId: ref.postId,
+        kind: ref.kind,
+        platform: sp?.platform || ref.platform,
+        caption: (sp?.caption || own[0]?.caption || '').slice(0, 200) || null,
+        thumbnail: sp?.mediaUrl || own[0]?.mediaUrl || null,
+        permalink: sp?.permalink || own[0]?.permalink || null,
+        items: own
+          .filter((l) => l.offering?.isActive)
+          .map((l) => ({ id: l.offering.id, title: l.offering.title, price: priceLabel(l.offering) })),
+      });
+    }
+    return out;
   }
 
   /** Turns automatic replies on or off for one chat. */
@@ -143,6 +231,9 @@ export class InboxService {
       take: 200,
     });
     return messages.map((m) => ({
+      // A public comment (or our public reply to one), else a DM.
+      kind: m.type === 'COMMENT' || (m.payload as { kind?: string } | null)?.kind === 'comment' ? 'comment' : 'dm',
+      postId: ((m.payload as { postId?: string } | null)?.postId as string | undefined) || null,
       from:
         m.direction === 'INBOUND'
           ? 'customer'
@@ -268,4 +359,18 @@ export class InboxService {
 
 function aiPaused(c: { aiEnabled: boolean; goalState: unknown }): boolean {
   return chatPaused(c);
+}
+
+/** Why the AI is quiet in this chat, for the inbox badge; null when it is not. */
+export function pauseReason(
+  c: { aiEnabled: boolean; goalState: unknown },
+  now = new Date(),
+): 'crisis' | 'handoff' | 'seller_replied' | 'off' | null {
+  if (!chatPaused(c, now)) return null;
+  const s = (c.goalState as GoalState | null) || {};
+  const future = (iso?: string) => Boolean(iso && new Date(iso) > now);
+  if (s.crisisAt || s.handoffReason === 'crisis') return 'crisis';
+  if (future(s.handedOffUntil)) return 'handoff';
+  if (future(s.sellerPausedUntil)) return 'seller_replied';
+  return 'off';
 }
