@@ -83,7 +83,7 @@ Create it in WhatsApp Manager on the Reel2Real number.
 - Name: `daily_story_ideas`
 - Category: Utility
 - Language: English (`en`)
-- Body: `Hi {{1}}, your 4 Instagram story ideas for today are ready. Tap below to see them and pick the one to post.`
+- Body: `Hi {{1}}, your new Instagram post ideas are ready. Tap below to see them and pick the ones you like.`
   (`{{1}}` is the business name)
 - Button: Quick reply, text `Show ideas`
 
