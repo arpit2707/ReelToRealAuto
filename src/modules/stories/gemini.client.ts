@@ -425,22 +425,63 @@ export class GeminiClient {
     return extractImage(await this.call(this.imageModel(), body));
   }
 
+  private fallbackTextModel() {
+    return process.env.GEMINI_TEXT_FALLBACK_MODEL || 'gemini-3.6-flash';
+  }
+
   private async call(model: string, body: unknown): Promise<any> {
+    try {
+      return await this.callModel(model, body);
+    } catch (err) {
+      // A busy text model can stay busy for minutes; a sibling model usually
+      // has room, so the day's ideas still go out.
+      const fallback = this.fallbackTextModel();
+      if (!(err instanceof GeminiBusyError) || model !== this.textModel() || fallback === model) {
+        throw err;
+      }
+      this.logger.warn(`Gemini ${model} still busy, switching to ${fallback}`);
+      return this.callModel(fallback, body);
+    }
+  }
+
+  private async callModel(model: string, body: unknown): Promise<any> {
     const key = process.env.GEMINI_API_KEY;
     if (!key) throw new Error('GEMINI_API_KEY is not set');
-    const res = await fetch(`${API_BASE}/${model}:generateContent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(`${API_BASE}/${model}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) return res.json();
       const detail = (await res.text()).slice(0, 500);
+      // Gemini answers 503 "high demand" and 429 rate limits in bursts that
+      // clear within seconds, so a short wait saves the whole daily run.
+      const wait = RETRY_DELAYS_MS[attempt];
+      if (RETRY_STATUSES.has(res.status) && wait !== undefined) {
+        this.logger.warn(`Gemini ${model} busy (${res.status}), retrying in ${wait / 1000}s`);
+        await this.sleep(wait);
+        continue;
+      }
       this.logger.error(`Gemini ${model} failed (${res.status}): ${detail}`);
+      if (RETRY_STATUSES.has(res.status)) throw new GeminiBusyError(model, res.status);
       throw new Error(`Gemini ${model} failed with ${res.status}`);
     }
-    return res.json();
+  }
+
+  protected sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
+
+class GeminiBusyError extends Error {
+  constructor(model: string, status: number) {
+    super(`Gemini ${model} failed with ${status}`);
+  }
+}
+
+const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
+const RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
 
 export function buildIdeasPrompt(ctx: BusinessContext, count: number): string {
   const products = ctx.products
