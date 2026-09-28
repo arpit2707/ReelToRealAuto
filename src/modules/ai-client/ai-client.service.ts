@@ -93,6 +93,42 @@ export class AiClientService {
     }
   }
 
+  /**
+   * The AI service sleeps on Render's free plan when idle. While it wakes,
+   * Render answers 502/503/504 itself for up to about a minute, so those (and
+   * dropped connections) are retried before the chat is handed to a human.
+   */
+  private async post(body: string): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      let response: Response | null = null;
+      let failure: string;
+      try {
+        response = await fetch(this.aiServiceUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            // Must match AI_SERVICE_TOKEN on the AI service, which rejects calls without it.
+            ...(process.env.AI_SERVICE_TOKEN ? { 'X-AI-Service-Token': process.env.AI_SERVICE_TOKEN } : {}),
+          },
+          body,
+        });
+        if (response.ok) return response;
+        failure = `HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`;
+      } catch (e: any) {
+        failure = e?.message || 'network error';
+      }
+      const wait = WAKE_RETRY_MS[attempt];
+      const retryable = !response || WAKE_STATUSES.has(response.status);
+      if (!retryable || wait === undefined) throw new Error(`AI service responded with ${failure}`);
+      this.logger.warn(`AI service not ready (${failure.slice(0, 60)}), retrying in ${wait / 1000}s`);
+      await this.sleep(wait);
+    }
+  }
+
+  protected sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   async generateReply(input: GenerateReplyPayload): Promise<GeneratedReplyResult> {
     try {
       const payload = await this.withProvider(input);
@@ -100,20 +136,7 @@ export class AiClientService {
         `Invoking Personalised-AI for sender ${payload.sender_id} on ${payload.channel_type}` +
           (payload.llm ? ` via ${payload.llm.provider}` : ''),
       );
-      const response = await fetch(this.aiServiceUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          // Must match AI_SERVICE_TOKEN on the AI service, which rejects calls without it.
-          ...(process.env.AI_SERVICE_TOKEN ? { 'X-AI-Service-Token': process.env.AI_SERVICE_TOKEN } : {}),
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`AI service responded with HTTP ${response.status}: ${await response.text()}`);
-      }
-
+      const response = await this.post(JSON.stringify(payload));
       return (await response.json()) as GeneratedReplyResult;
     } catch (error: any) {
       this.logger.error(
@@ -131,3 +154,7 @@ export class AiClientService {
     }
   }
 }
+
+const WAKE_STATUSES = new Set([502, 503, 504]);
+// About 90 seconds in all: enough for a Render free instance to spin up.
+const WAKE_RETRY_MS = [10_000, 20_000, 30_000, 30_000];
