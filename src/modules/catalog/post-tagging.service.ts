@@ -565,6 +565,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     const blank = (s: (typeof socials)[number]) => ({
       postId: s.postId,
       platform: s.platform,
+      channelId: s.channelId,
       caption: s.caption,
       mediaUrl: s.mediaUrl,
       permalink: s.permalink,
@@ -579,6 +580,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
       const p = posts.get(l.postId) || {
         postId: l.postId,
         platform: l.platform,
+        channelId: s?.channelId ?? null,
         caption: l.caption ?? s?.caption ?? null,
         mediaUrl: l.mediaUrl ?? s?.mediaUrl ?? null,
         permalink: l.permalink ?? s?.permalink ?? null,
