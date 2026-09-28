@@ -33,6 +33,8 @@ export type ChannelPost = {
 
 const POST_LIMIT = 12;
 const COMMENT_LIMIT = 10;
+// Posts per page when the seller goes through all their posts.
+const PAGE_SIZE = 10;
 
 // Posts are read live from the Graph API rather than stored: Meta is the source
 // of truth for captions, media URLs and counts, and nothing here needs history.
@@ -107,6 +109,96 @@ export class PostsService {
         `Meta did not return posts: ${err.message}`,
       );
     }
+  }
+
+  /**
+   * One page of posts without their comments, newest first, for the seller to
+   * go through every post. `after` / `before` are Meta's cursors.
+   */
+  async pagePosts(
+    orgId: string,
+    channelId: string,
+    opts: { after?: string; before?: string; limit?: number } = {},
+  ): Promise<{
+    channelId: string;
+    platform: string;
+    posts: ChannelPost[];
+    paging: { after: string | null; before: string | null };
+  }> {
+    const { channel, token } = await this.channelFor(orgId, channelId);
+    const limit = String(Math.min(Math.max(opts.limit || PAGE_SIZE, 1), 25));
+    const cursor: Record<string, string> = opts.after
+      ? { after: opts.after }
+      : opts.before
+        ? { before: opts.before }
+        : {};
+    const facebook = channel.platform === 'FACEBOOK';
+    let json: any;
+    try {
+      json = await this.graphGet(
+        facebook
+          ? `/${channel.channelIdentifier}/posts`
+          : `/${channel.channelIdentifier}/media`,
+        {
+          fields: facebook
+            ? 'id,message,story,created_time,full_picture,permalink_url,reactions.summary(true).limit(0),comments.limit(0).summary(true)'
+            : 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count',
+          limit,
+          ...cursor,
+        },
+        token,
+      );
+    } catch (err: any) {
+      this.logger.warn(
+        `Could not load posts for ${channel.platform} ${channel.channelIdentifier}: ${err.message}`,
+      );
+      throw new BadGatewayException(
+        `Meta did not return posts: ${err.message}`,
+      );
+    }
+    const posts: ChannelPost[] = (json.data || []).map((p: any) =>
+      facebook
+        ? {
+            id: String(p.id),
+            text: p.message || p.story || '',
+            mediaUrl: p.full_picture || null,
+            mediaType: p.full_picture ? 'IMAGE' : null,
+            permalink: p.permalink_url || null,
+            createdAt: p.created_time || null,
+            likes: p.reactions?.summary?.total_count ?? null,
+            commentsCount: p.comments?.summary?.total_count ?? null,
+            comments: null,
+          }
+        : {
+            id: String(p.id),
+            text: p.caption || '',
+            mediaUrl:
+              p.media_type === 'VIDEO'
+                ? p.thumbnail_url || null
+                : p.media_url || null,
+            mediaType: p.media_type || null,
+            permalink: p.permalink || null,
+            createdAt: p.timestamp || null,
+            likes: p.like_count ?? null,
+            commentsCount: p.comments_count ?? null,
+            comments: null,
+          },
+    );
+    // Meta returns cursors even at the ends; `next` / `previous` say whether
+    // there is anything that way.
+    const cursors = json.paging?.cursors || {};
+    return {
+      channelId: channel.id,
+      platform: channel.platform,
+      posts,
+      paging: {
+        after: json.paging?.next && cursors.after ? String(cursors.after) : null,
+        before:
+          (opts.after || opts.before) && json.paging?.previous && cursors.before
+            ? String(cursors.before)
+            : null,
+      },
+    };
   }
 
   /** One post without its comments, for tagging a post the moment it is commented on. */

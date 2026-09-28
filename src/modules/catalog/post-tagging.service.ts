@@ -648,6 +648,115 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Every post of one page, 10 at a time straight from Meta, with what the
+   * seller set on each (note, items, AI switch). This is the manual way: no
+   * catalog or AI matching is needed to see a post and give it context.
+   */
+  async browsePosts(
+    orgId: string,
+    opts: { channelId?: string; after?: string; before?: string },
+  ) {
+    const channels = await this.prisma.channel.findMany({
+      where: {
+        orgId,
+        isActive: true,
+        platform: { in: ['INSTAGRAM', 'FACEBOOK'] },
+        status: { not: 'DISCONNECTED' },
+      },
+      select: { id: true, platform: true, name: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!channels.length)
+      throw new BadRequestException(
+        'Connect an Instagram account or Facebook Page first',
+      );
+    const channel =
+      channels.find((c) => c.id === opts.channelId) ||
+      channels.find((c) => c.platform === 'INSTAGRAM') ||
+      channels[0];
+    const page = await this.posts.pagePosts(orgId, channel.id, {
+      after: opts.after,
+      before: opts.before,
+    });
+    const ids = page.posts.map((p) => p.id);
+    // Stored so a comment's reply has the caption, without marking the post
+    // as matched: auto-matching (when on) still looks at it.
+    if (ids.length)
+      await this.prisma.socialPost.createMany({
+        data: page.posts.map((p) => ({
+          orgId,
+          postId: p.id,
+          channelId: channel.id,
+          platform: channel.platform,
+          caption: p.text?.slice(0, 2000) || null,
+          mediaUrl: p.mediaUrl,
+          permalink: p.permalink,
+        })),
+        skipDuplicates: true,
+      });
+    const [socials, links, onSet] = await Promise.all([
+      this.prisma.socialPost.findMany({
+        where: { orgId, postId: { in: ids } },
+        select: { postId: true, note: true, source: true, aiEnabled: true },
+      }),
+      this.prisma.postOfferingLink.findMany({
+        where: { orgId, postId: { in: ids } },
+        include: {
+          offering: {
+            select: { id: true, title: true, type: true, isActive: true },
+          },
+        },
+        orderBy: [{ createdAt: 'desc' }],
+      }),
+      this.gate ? this.gate.onPosts(orgId, ids) : Promise.resolve(new Set<string>()),
+    ]);
+    const social = new Map(socials.map((s) => [s.postId, s]));
+    const posts = page.posts.map((p) => {
+      const s = social.get(p.id);
+      const tags = links
+        .filter((l) => l.postId === p.id)
+        .map((l) => ({
+          id: l.id,
+          offering: l.offering,
+          status: l.status,
+          confidence: l.confidence,
+          reason: l.reason,
+        }));
+      const source = s?.source || 'META';
+      const confirmed = tags.some(
+        (t) => t.status === 'SELLER_CONFIRMED' && t.offering?.isActive !== false,
+      );
+      const noted = (s?.note?.trim().length || 0) >= MIN_POST_CONTEXT;
+      const hasContext = source === 'DAILY_POST' ? noted : noted || confirmed;
+      return {
+        postId: p.id,
+        platform: channel.platform,
+        channelId: channel.id,
+        caption: p.text || null,
+        mediaUrl: p.mediaUrl,
+        mediaType: p.mediaType,
+        permalink: p.permalink,
+        createdAt: p.createdAt,
+        likes: p.likes,
+        commentsCount: p.commentsCount,
+        note: s?.note ?? null,
+        source,
+        tags,
+        aiEnabled: Boolean(s?.aiEnabled),
+        aiOn: onSet.has(p.id),
+        hasContext,
+        needsContext: !hasContext,
+      };
+    });
+    return {
+      channels,
+      channelId: channel.id,
+      posts,
+      paging: page.paging,
+    };
+  }
+
+  /**
    * The seller's own context for one post ("offer valid till Sunday", "only
    * size 7 left"). The AI reads it with the caption; prices still come only
    * from the catalog.
@@ -658,6 +767,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     input: {
       note?: string | null;
       platform?: string;
+      channelId?: string | null;
       caption?: string | null;
       mediaUrl?: string | null;
       permalink?: string | null;
@@ -665,12 +775,21 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
   ) {
     if (!postId) throw new BadRequestException('postId is required');
     const note = input.note?.trim().slice(0, MAX_NOTE) || null;
+    const channelId = input.channelId
+      ? (
+          await this.prisma.channel.findFirst({
+            where: { id: input.channelId, orgId },
+            select: { id: true },
+          })
+        )?.id || null
+      : null;
     const saved = await this.prisma.socialPost.upsert({
       where: { orgId_postId: { orgId, postId } },
       update: { note },
       create: {
         orgId,
         postId,
+        channelId,
         platform: input.platform || 'INSTAGRAM',
         caption: input.caption?.slice(0, 2000) || null,
         mediaUrl: input.mediaUrl || null,

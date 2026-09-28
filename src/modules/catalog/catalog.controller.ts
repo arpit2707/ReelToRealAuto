@@ -175,6 +175,21 @@ export class CatalogController {
     return this.tagging.setStatus(user.orgId, id, body?.status);
   }
 
+  /** Every post of a page, 10 at a time from Meta, with its note, items and AI switch. */
+  @Get('posts')
+  browsePosts(
+    @CurrentUser() user: JwtPayload,
+    @Query('channelId') channelId?: string,
+    @Query('after') after?: string,
+    @Query('before') before?: string,
+  ) {
+    return this.tagging.browsePosts(user.orgId, {
+      channelId: channelId || undefined,
+      after: after || undefined,
+      before: before || undefined,
+    });
+  }
+
   /** The post's AI switch. Turning it on needs a confirmed item or a note. */
   @Put('posts/:postId/ai')
   @Roles('OWNER', 'ADMIN')
@@ -195,6 +210,7 @@ export class CatalogController {
     body: {
       note?: string | null;
       platform?: string;
+      channelId?: string | null;
       caption?: string | null;
       mediaUrl?: string | null;
       permalink?: string | null;
