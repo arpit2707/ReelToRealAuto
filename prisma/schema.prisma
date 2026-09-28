@@ -675,6 +675,8 @@ model CommentReplyJob {
   threadId    String
   thread      CommentThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
   commentId   String        @unique
+  // The commenter's inbox chat, where the comment and our answer are saved.
+  conversationId String?
   authorId    String?
   authorName  String?
   text        String

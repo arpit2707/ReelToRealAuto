@@ -24,6 +24,14 @@ export type GoalState = {
   crisisAt?: string;
   // "We got your message" went out while the AI service was down.
   aiDownNoticeAt?: string;
+  // The post this chat is about (from a comment, story reply, share or ad)
+  // and when it was last mentioned; it is remembered for 7 days.
+  postId?: string;
+  postAt?: string;
+  // PRODUCTS or SERVICES, once a customer on a "both" page made it clear.
+  offeringType?: string;
+  // DISCOVER -> QUOTE -> COLLECT -> DONE
+  stage?: string;
 };
 
 export type ContextOffering = {

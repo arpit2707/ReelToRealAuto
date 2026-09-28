@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS "CommentReplyJob" (
     "channelId" TEXT NOT NULL,
     "threadId" TEXT NOT NULL,
     "commentId" TEXT NOT NULL,
+    "conversationId" TEXT,
     "authorId" TEXT,
     "authorName" TEXT,
     "text" TEXT NOT NULL,

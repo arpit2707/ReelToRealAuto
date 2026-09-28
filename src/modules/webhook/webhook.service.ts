@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { AiClientService } from '../ai-client/ai-client.service';
@@ -9,6 +9,8 @@ import { StoriesService } from '../stories/stories.service';
 import { ReplyEngineService, type ReplyOutcome } from '../catalog/reply-engine.service';
 import { PostTaggingService } from '../catalog/post-tagging.service';
 import { hmacSha256Hex, timingSafeEqualString } from '../../common/hmac';
+import { CommentPipelineService } from './comment-pipeline.service';
+import { normalizeFacebook, normalizeInstagram } from './comments';
 
 @Injectable()
 export class WebhookService {
@@ -24,6 +26,7 @@ export class WebhookService {
     private readonly stories: StoriesService,
     private readonly replies: ReplyEngineService,
     private readonly postTagging: PostTaggingService,
+    @Optional() private readonly comments?: CommentPipelineService,
   ) {}
 
   verifyWebhook(mode: string, token: string, challenge: string): string | null {
@@ -357,56 +360,16 @@ export class WebhookService {
         }
 
         if (change.field === 'feed' && change.value?.item === 'comment') {
-          const commentVal = change.value;
-          const commentId = commentVal.comment_id;
-          const text = commentVal.message;
-          const senderId = commentVal.from?.id;
-
-          if (senderId && senderId === pageId) {
-            this.logger.log(`Skipping self-comment on Page ${pageId}`);
-            continue;
-          }
-          if (!(await this.claimEvent(commentId, 'facebook_comment'))) continue;
-          if (!text || !commentId) continue;
-
-          const aiResponse = await this.replies.reply({
-            orgId: brandId,
-            brandName,
-            platform: 'FACEBOOK',
-            eventType: 'comment',
-            text,
-            senderId: senderId || 'anonymous',
-            senderName: commentVal.from?.name || null,
-            postId: commentVal.post_id || null,
-            channelId: channel.id,
-          });
-          if (!aiResponse) continue;
-
-          if (aiResponse.public_reply) {
-            await this.metaPublisher.replyToFacebookComment(commentId, aiResponse.public_reply, decryptedToken);
-          }
-          if (aiResponse.private_dm && senderId) {
-            await this.metaPublisher.sendFacebookMessengerDm(pageId, senderId, aiResponse.private_dm, decryptedToken);
-          }
-
-          await this.prisma.interactionLog
-            .create({
-              data: {
-                orgId: channel.orgId,
-                channelType: 'FACEBOOK',
-                eventType: 'COMMENT',
-                inboundMessage: text,
-                senderId: senderId || 'anonymous',
-                publicReply: aiResponse.public_reply,
-                privateDm: aiResponse.private_dm,
-                intent: aiResponse.intent,
-                sentiment: aiResponse.sentiment,
-                requiresHuman: aiResponse.requires_human_attention,
-                externalEventId: commentId,
-                ...this.outcomeLog(aiResponse),
-              },
-            })
-            .catch((e) => this.logger.error(`Failed to log Facebook comment: ${e.message}`));
+          const comment = normalizeFacebook(change.value);
+          if (!comment || !this.comments) continue;
+          // Deletes and edits carry the same comment id as the original.
+          if (comment.verb === 'add' && !(await this.claimEvent(comment.commentId, 'facebook_comment'))) continue;
+          await this.comments
+            .handle(
+              { id: channel.id, orgId: channel.orgId, channelIdentifier: pageId },
+              comment,
+            )
+            .catch((e) => this.logger.error(`Facebook comment ${comment.commentId} failed: ${e.message}`));
         }
       }
     }
@@ -513,15 +476,7 @@ export class WebhookService {
     if (entry.changes) {
       for (const change of entry.changes) {
         if (change.field === 'comments') {
-          await this.handleComment(
-            change.value,
-            brandId,
-            brandName,
-            decryptedToken,
-            channel.orgId,
-            entryId,
-            channel.id,
-          );
+          await this.handleComment(change.value, channel.orgId, entryId, channel.id);
         }
       }
     }
@@ -535,66 +490,17 @@ export class WebhookService {
 
   private async handleComment(
     commentData: any,
-    brandId: string,
-    brandName: string,
-    accessToken: string,
     orgId: string,
     igAccountId: string,
-    channelId?: string,
+    channelId: string,
   ) {
-    const commentId = commentData.id;
-    const text = commentData.text;
-    const senderId = commentData.from?.id;
-    const mediaId = commentData.media?.id;
-
-    if (senderId && senderId === igAccountId) {
-      this.logger.log(`Skipping self-comment on IG ${igAccountId}`);
-      return;
-    }
-    if (!(await this.claimEvent(commentId, 'instagram_comment'))) return;
-    if (!text || !commentId) return;
-
-    this.logger.log(`Processing comment [${commentId}] on Brand: ${brandName}`);
-
-    const aiResponse = await this.replies.reply({
-      orgId,
-      brandName,
-      platform: 'INSTAGRAM',
-      eventType: 'comment',
-      text,
-      senderId: senderId || 'anonymous',
-      senderName: commentData.from?.username || null,
-      postId: mediaId || null,
-      channelId: channelId || null,
-    });
-    if (!aiResponse) return;
-
-    if (aiResponse.public_reply) {
-      await this.metaPublisher.replyToComment(commentId, aiResponse.public_reply, accessToken);
-    }
-
-    if (aiResponse.private_dm && senderId) {
-      await this.metaPublisher.sendPrivateDm(senderId, aiResponse.private_dm, accessToken);
-    }
-
-    await this.prisma.interactionLog
-      .create({
-        data: {
-          orgId,
-          channelType: 'INSTAGRAM',
-          eventType: 'COMMENT',
-          inboundMessage: text,
-          senderId: senderId || 'anonymous',
-          publicReply: aiResponse.public_reply,
-          privateDm: aiResponse.private_dm,
-          intent: aiResponse.intent,
-          sentiment: aiResponse.sentiment,
-          requiresHuman: aiResponse.requires_human_attention,
-          externalEventId: commentId,
-          ...this.outcomeLog(aiResponse),
-        },
-      })
-      .catch((e) => this.logger.error(`Failed to log interaction: ${e.message}`));
+    const comment = normalizeInstagram(commentData);
+    if (!comment || !this.comments) return;
+    if (!(await this.claimEvent(comment.commentId, 'instagram_comment'))) return;
+    this.logger.log(`Processing comment [${comment.commentId}] for org ${orgId}`);
+    await this.comments
+      .handle({ id: channelId, orgId, channelIdentifier: igAccountId }, comment)
+      .catch((e) => this.logger.error(`Instagram comment ${comment.commentId} failed: ${e.message}`));
   }
 
   private async handleMessage(

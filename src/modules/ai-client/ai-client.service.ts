@@ -31,6 +31,8 @@ export interface GenerateReplyPayload {
   offerings?: Array<Record<string, unknown>>;
   goal_state?: Record<string, unknown>;
   recent_messages?: Array<{ from: string; text: string }>;
+  // Who a public comment reply answers (the backend adds the @tag).
+  comment_author?: string;
   // We only call when this chat should get an AI answer (our own hand-off
   // pause is over or the seller pressed Resume), so reopen it on the AI side.
   resume_if_pending?: boolean;

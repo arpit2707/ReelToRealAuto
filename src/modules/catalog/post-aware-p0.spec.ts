@@ -15,10 +15,13 @@ describe('crisis detection', () => {
     'आत्महत्या',
   ])('flags %s', (text) => expect(isCrisis(text)).toBe(true));
 
-  it.each(['killer look!', 'price kya hai', 'dying to buy this', 'mar gaye itna sundar', 'to die for'])(
-    'ignores %s',
-    (text) => expect(isCrisis(text)).toBe(false),
-  );
+  it.each([
+    'killer look!',
+    'price kya hai',
+    'dying to buy this',
+    'mar gaye itna sundar',
+    'to die for',
+  ])('ignores %s', (text) => expect(isCrisis(text)).toBe(false));
 
   it('answers in the customer language', () => {
     expect(languageOf('I want to die')).toBe('english');
@@ -52,7 +55,11 @@ describe('ReplyEngineService safety and pauses', () => {
     conversationId: 'c1',
   };
 
-  function make(ai: any, convo: any = { aiEnabled: true, goalState: null }, context: any = ctx) {
+  function make(
+    ai: any,
+    convo: any = { aiEnabled: true, goalState: null },
+    context: any = ctx,
+  ) {
     const prisma: any = {
       businessProfile: { findUnique: jest.fn().mockResolvedValue(profile) },
       conversation: {
@@ -83,16 +90,27 @@ describe('ReplyEngineService safety and pauses', () => {
   });
 
   it('sends helplines only once per chat', async () => {
-    const { engine } = make({}, {
-      aiEnabled: false,
-      goalState: { crisisAt: '2026-09-28T00:00:00Z', handoffReason: 'crisis' },
-    });
+    const { engine } = make(
+      {},
+      {
+        aiEnabled: false,
+        goalState: {
+          crisisAt: '2026-09-28T00:00:00Z',
+          handoffReason: 'crisis',
+        },
+      },
+    );
     expect(await engine.reply({ ...req, text: 'I want to die' })).toBeNull();
   });
 
   it('answers a crisis comment publicly with a short line only', async () => {
     const { engine } = make({});
-    const out = await engine.reply({ ...req, eventType: 'comment', conversationId: null, text: 'suicide' });
+    const out = await engine.reply({
+      ...req,
+      eventType: 'comment',
+      conversationId: null,
+      text: 'suicide',
+    });
     expect(out?.public_reply).toBe(CRISIS_PUBLIC);
     expect(out?.private_dm).toContain('112');
   });
@@ -105,7 +123,10 @@ describe('ReplyEngineService safety and pauses', () => {
 
   it('stays quiet for 12 hours after the seller replied', async () => {
     const until = new Date(Date.now() + 60_000).toISOString();
-    const { engine, aiClient } = make({ private_dm: 'hi' }, { aiEnabled: true, goalState: { sellerPausedUntil: until } });
+    const { engine, aiClient } = make(
+      { private_dm: 'hi' },
+      { aiEnabled: true, goalState: { sellerPausedUntil: until } },
+    );
     expect(await engine.reply(req)).toBeNull();
     expect(aiClient.generateReply).not.toHaveBeenCalled();
   });
@@ -124,11 +145,17 @@ describe('ReplyEngineService safety and pauses', () => {
   });
 
   it('says "message mil gaya" once while the AI service is down', async () => {
-    const down = { public_reply: null, private_dm: null, intent: 'ai_unavailable', requires_human_attention: true };
+    const down = {
+      public_reply: null,
+      private_dm: null,
+      intent: 'ai_unavailable',
+      requires_human_attention: true,
+    };
     const first = make(down);
     const out = await first.engine.reply({ ...req, text: 'size kya hai?' });
     expect(out?.private_dm).toContain('mil gaya');
-    const saved = first.prisma.conversation.update.mock.calls[0][0].data.goalState;
+    const saved =
+      first.prisma.conversation.update.mock.calls[0][0].data.goalState;
     expect(saved.aiDownNoticeAt).toBeTruthy();
     expect(saved.handedOffUntil).toBeUndefined();
 
@@ -139,7 +166,12 @@ describe('ReplyEngineService safety and pauses', () => {
   it('never sends the same soft line twice in a row', async () => {
     const line = 'Accha sawaal! Team ise confirm karke aapko yahin batayegi.';
     const { engine } = make(
-      { private_dm: line, action: 'HANDOFF', handoff_reason: 'missing_information', requires_human_attention: true },
+      {
+        private_dm: line,
+        action: 'HANDOFF',
+        handoff_reason: 'missing_information',
+        requires_human_attention: true,
+      },
       undefined,
       { ...ctx, recent_messages: [{ from: 'business', text: line }] },
     );
@@ -150,9 +182,15 @@ describe('ReplyEngineService safety and pauses', () => {
     const future = new Date(Date.now() + 1000).toISOString();
     const past = new Date(Date.now() - 1000).toISOString();
     expect(chatPaused({ aiEnabled: false, goalState: null })).toBe(true);
-    expect(chatPaused({ aiEnabled: true, goalState: { handedOffUntil: future } })).toBe(true);
-    expect(chatPaused({ aiEnabled: true, goalState: { sellerPausedUntil: future } })).toBe(true);
-    expect(chatPaused({ aiEnabled: true, goalState: { sellerPausedUntil: past } })).toBe(false);
+    expect(
+      chatPaused({ aiEnabled: true, goalState: { handedOffUntil: future } }),
+    ).toBe(true);
+    expect(
+      chatPaused({ aiEnabled: true, goalState: { sellerPausedUntil: future } }),
+    ).toBe(true);
+    expect(
+      chatPaused({ aiEnabled: true, goalState: { sellerPausedUntil: past } }),
+    ).toBe(false);
   });
 });
 
@@ -194,9 +232,15 @@ describe('InboxService seller reply and resume', () => {
 
   it('pauses the AI for 12 hours when the seller replies', async () => {
     const { service, prisma } = build({ handoffReason: 'missing_information' });
-    await service.reply({ sub: 'u', orgId: 'org', role: 'OWNER', email: 'a@b.c' } as any, 'INSTAGRAM', 'c1', 'Haan hai');
+    await service.reply(
+      { sub: 'u', orgId: 'org', role: 'OWNER', email: 'a@b.c' } as any,
+      'INSTAGRAM',
+      'c1',
+      'Haan hai',
+    );
     const saved = prisma.conversation.update.mock.calls[0][0].data.goalState;
-    const hours = (new Date(saved.sellerPausedUntil).getTime() - Date.now()) / 3_600_000;
+    const hours =
+      (new Date(saved.sellerPausedUntil).getTime() - Date.now()) / 3_600_000;
     expect(hours).toBeGreaterThan(11.9);
     expect(hours).toBeLessThanOrEqual(12);
     expect(saved.handoffReason).toBeUndefined();

@@ -33,6 +33,8 @@ export type ReplyRequest = {
   channelId?: string | null;
   // A seller trying the AI from the dashboard; works before onboarding too.
   preview?: boolean;
+  // Who a public comment reply answers; the queue adds the @tag itself.
+  commentAuthor?: string | null;
 };
 
 // A comment on a brand-new post waits this long for the post to be matched to
@@ -77,7 +79,8 @@ export function chatPaused(
 
 const SAFE_DM =
   'Thank you! Iski exact price aur details hamari team aapko thodi der me bhej degi.';
-const SAFE_PUBLIC = 'Thank you! Details DM me bhej di hain.';
+// Never claims a DM: the comment queue adds "DM check karein" only when one went.
+const SAFE_PUBLIC = 'Thank you! Team jaldi details share karegi.';
 
 // The catalog prompt reads only custom_instructions for style, so the setup
 // answers are spelled out there as well.
@@ -227,6 +230,9 @@ export class ReplyEngineService {
       offerings: ctx.offerings,
       goal_state: ctx.goal_state as Record<string, unknown>,
       recent_messages: ctx.recent_messages,
+      ...(req.eventType === 'comment' && req.commentAuthor
+        ? { comment_author: req.commentAuthor }
+        : {}),
       resume_if_pending: true,
     });
 
