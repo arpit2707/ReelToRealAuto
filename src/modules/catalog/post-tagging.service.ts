@@ -498,7 +498,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     });
     if (!candidates.length) return [];
 
-    if (!this.gemini.isConfigured()) {
+    if (!(await this.gemini.isConfigured(orgId, 'POST_TAGGING'))) {
       // Without Gemini, only a clear caption match counts, and never above the
       // confidence that replies use automatically.
       return byCaption.slice(0, 1).map((b) => ({
@@ -528,6 +528,8 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     const result = await this.gemini.generateJson<{
       matches: Array<{ id: string; confidence: number; reason: string }>;
     }>(
+      orgId,
+      'POST_TAGGING',
       prompt,
       {
         type: 'OBJECT',

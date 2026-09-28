@@ -423,7 +423,7 @@ export class StoriesService implements OnModuleInit {
   async generateBatch(orgId: string, opts: { force?: boolean; via?: 'whatsapp' | 'web' } = {}) {
     const viaWhatsApp = opts.via !== 'web';
     if (viaWhatsApp && !this.sender()) throw new Error('Story WhatsApp sender is not configured');
-    if (!this.gemini.isConfigured()) throw new Error('GEMINI_API_KEY is not set');
+    if (!(await this.gemini.isConfigured(orgId))) throw new Error('No AI provider is connected');
 
     const settings = (await this.prisma.storySettings.findUnique({
       where: { orgId },
@@ -503,6 +503,7 @@ export class StoriesService implements OnModuleInit {
       const description = settings.businessDescription || page?.description || profile?.description || null;
 
       const trendKeywords = await this.researchTrends({
+        orgId,
         industry: profile?.industry,
         description,
         seeds: settings.nicheKeywords || [],
@@ -515,6 +516,7 @@ export class StoriesService implements OnModuleInit {
 
       const count = clampCount(settings.optionCount);
       const ideas = await this.gemini.generateIdeas(
+        orgId,
         {
           brandName: profile?.businessName || org.name,
           instagramHandle: igChannel?.handle,
@@ -552,7 +554,7 @@ export class StoriesService implements OnModuleInit {
           continue;
         }
         const image = await toStoryJpeg(
-          await this.withRetry(() => this.gemini.generateImage(idea.imagePrompt + brandImageStyle(brandKit))),
+          await this.withRetry(() => this.gemini.generateImage(orgId, idea.imagePrompt + brandImageStyle(brandKit))),
         );
         await this.prisma.storyOption.create({
           data: {
@@ -619,6 +621,7 @@ export class StoriesService implements OnModuleInit {
    * the niche alone, and without either the seeds are used as they are.
    */
   async researchTrends(ctx: {
+    orgId: string;
     industry?: string | null;
     description?: string | null;
     seeds: string[];
@@ -637,7 +640,7 @@ export class StoriesService implements OnModuleInit {
       }
     }
     try {
-      const ranked = await this.gemini.trendKeywords({
+      const ranked = await this.gemini.trendKeywords(ctx.orgId, {
         industry: ctx.industry,
         description: ctx.description,
         seeds,
@@ -1057,6 +1060,7 @@ export class StoriesService implements OnModuleInit {
     if (note) {
       try {
         draft = await this.gemini.refinePost(
+          round.orgId,
           { ...option, caption: option.caption || '' },
           { brandName: profile?.businessName || org?.name || '', brandKit, note },
         );
@@ -1066,7 +1070,7 @@ export class StoriesService implements OnModuleInit {
       }
     }
     const image = await toStoryJpeg(
-      await this.withRetry(() => this.gemini.generateImage(draft.imagePrompt + brandImageStyle(brandKit))),
+      await this.withRetry(() => this.gemini.generateImage(round.orgId, draft.imagePrompt + brandImageStyle(brandKit))),
     );
     const post = await this.prisma.storyBatch.create({
       data: {
@@ -1129,7 +1133,7 @@ export class StoriesService implements OnModuleInit {
       .map((p) => ({ position: Number(p?.position), note: String(p?.note || '').trim().slice(0, 500) || null }))
       .filter((p) => Number.isInteger(p.position) && p.position >= 1);
     if (!clean.length) throw new BadRequestException('Pick at least one idea');
-    if (!this.gemini.isConfigured()) throw new BadRequestException('GEMINI_API_KEY is not set');
+    if (!(await this.gemini.isConfigured(orgId))) throw new BadRequestException('No AI provider is connected');
     setImmediate(() => {
       this.pickContexts(round.id, clean, { orgId }).catch((e) =>
         this.logger.error(`Dashboard pick for round ${round.id} failed: ${e.message}`),
@@ -1161,7 +1165,7 @@ export class StoriesService implements OnModuleInit {
   async ensureInsights(orgId: string, brandName: string, now = new Date()) {
     const saved = await this.prisma.contentInsight.findUnique({ where: { orgId } });
     if (saved && now.getTime() - saved.analyzedAt.getTime() < INSIGHTS_TTL_MS) return saved;
-    if (!this.gemini.isConfigured()) return saved;
+    if (!(await this.gemini.isConfigured(orgId))) return saved;
     const posts = await this.prisma.socialPost.findMany({
       where: { orgId, caption: { not: null } },
       orderBy: [{ postedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
@@ -1170,6 +1174,7 @@ export class StoriesService implements OnModuleInit {
     });
     if (posts.length < MIN_POSTS_FOR_INSIGHTS) return saved;
     const insights = await this.gemini.analyzePosts(
+      orgId,
       brandName,
       posts.map((p) => ({
         caption: String(p.caption),
@@ -1185,7 +1190,7 @@ export class StoriesService implements OnModuleInit {
 
   /** A first brand kit from the page's own posts (captions and a few images), for the seller to confirm. */
   async suggestBrandKit(orgId: string) {
-    if (!this.gemini.isConfigured()) throw new BadRequestException('GEMINI_API_KEY is not set');
+    if (!(await this.gemini.isConfigured(orgId))) throw new BadRequestException('No AI provider is connected');
     const [org, posts] = await Promise.all([
       this.prisma.organization.findUnique({ where: { id: orgId }, select: { name: true } }),
       this.prisma.socialPost.findMany({
@@ -1212,7 +1217,7 @@ export class StoriesService implements OnModuleInit {
     if (!captions.length && !images.length) {
       throw new BadRequestException('No posts found yet. Sync your posts in Post tags first, or fill the brand kit in.');
     }
-    return this.gemini.suggestBrandKit(org?.name || '', captions, images);
+    return this.gemini.suggestBrandKit(orgId, org?.name || '', captions, images);
   }
 
   // ------------------------------------------------- daily post context
@@ -1726,8 +1731,13 @@ export class StoriesService implements OnModuleInit {
   }
 
   private async editOptionImage(optionId: string, image: Buffer, instruction: string) {
+    const owner = await this.prisma.storyOption.findUnique({
+      where: { id: optionId },
+      select: { batch: { select: { orgId: true } } },
+    });
+    const orgId = owner?.batch?.orgId || '';
     const edited = await toStoryJpeg(
-      await this.withRetry(() => this.gemini.editImage(image, 'image/jpeg', instruction)),
+      await this.withRetry(() => this.gemini.editImage(orgId, image, 'image/jpeg', instruction)),
     );
     return this.prisma.storyOption.update({
       where: { id: optionId },
@@ -1799,9 +1809,10 @@ export class StoriesService implements OnModuleInit {
         settings?.nicheKeywords?.[0] || (profile?.industry ? humanIndustry(profile.industry) : 'new arrival'),
       offeringId: null as string | null,
     };
-    if (this.gemini.isConfigured()) {
+    if (await this.gemini.isConfigured(orgId)) {
       try {
         const d = await this.gemini.describeOwnPhoto(
+          orgId,
           { data: draft, mimeType: 'image/jpeg' },
           {
             brandName: profile?.businessName || org.name,
@@ -1963,7 +1974,7 @@ export class StoriesService implements OnModuleInit {
     if (!PICKABLE.includes(batch.status)) throw new BadRequestException(statusMessage(batch.status));
     const option = batch.options[0];
     if (!hasImage(option)) throw new NotFoundException(`Option ${position} not found`);
-    if (!this.gemini.isConfigured()) throw new BadRequestException('Image editing is not set up');
+    if (!(await this.gemini.isConfigured(orgId, 'POST_IMAGES'))) throw new BadRequestException('Image editing is not set up');
     const updated = await this.editOptionImage(option.id, await this.loadMedia(option, 'image'), text.slice(0, 500));
     return { id: updated.id, revision: updated.revision, imageUrl: this.mediaUrl(updated.id, 'draft', updated.revision) };
   }
@@ -2109,7 +2120,7 @@ export class StoriesService implements OnModuleInit {
         finalImage = draft;
       } else {
         try {
-          finalImage = await toStoryJpeg(await this.gemini.addTextToImage(draft, 'image/jpeg', option.title, hashtags));
+          finalImage = await toStoryJpeg(await this.gemini.addTextToImage(orgId, draft, 'image/jpeg', option.title, hashtags));
         } catch (e: any) {
           this.logger.warn(`Gemini lettering failed, using overlay: ${e.message}`);
           finalImage = await overlayText(draft, option.title, hashtags);

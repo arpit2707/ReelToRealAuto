@@ -1,4 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
+import { AiProviderService } from '../ai-providers/ai-provider.service';
+import type { AiService } from '../ai-providers/ai-providers.types';
+import { extractGeminiImage, extractGeminiText, LlmClient, type ImagePart } from '../ai-providers/llm.client';
 
 export type StoryIdea = {
   title: string;
@@ -24,7 +27,12 @@ export type BusinessContext = {
   description?: string | null;
   industry?: string | null;
   persona?: unknown;
-  products: Array<{ id?: string; title: string; price: number; currency: string }>;
+  products: Array<{
+    id?: string;
+    title: string;
+    price: number;
+    currency: string;
+  }>;
   recentTitles: string[];
   forDate: string;
   // Today's researched keywords; each idea should target one of them.
@@ -46,9 +54,18 @@ export type BrandKit = {
   avoid?: string[];
 };
 
-export type PostInsights = { summary: string; topTopics: string[]; weakTopics: string[] };
+export type PostInsights = {
+  summary: string;
+  topTopics: string[];
+  weakTopics: string[];
+};
 
-export type PastPost = { caption: string; likes?: number | null; comments?: number | null; postedAt?: string | null };
+export type PastPost = {
+  caption: string;
+  likes?: number | null;
+  comments?: number | null;
+  postedAt?: string | null;
+};
 
 export type PostDraft = { title: string; caption: string; imagePrompt: string };
 
@@ -68,55 +85,48 @@ export type NicheContext = {
   forDate: string;
 };
 
-const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
-
-/** Thin REST client for the Gemini API (text ideas and 9:16 story images). */
+/**
+ * Prompts for post ideas, captions and images. Each call runs on the provider
+ * (Gemini, OpenAI or Claude) the superadmin or the workspace chose for that
+ * service; the name stays from when it only spoke Gemini.
+ */
 @Injectable()
 export class GeminiClient {
-  private readonly logger = new Logger(GeminiClient.name);
+  constructor(
+    private readonly providers: AiProviderService,
+    private readonly llm: LlmClient,
+  ) {}
 
-  isConfigured(): boolean {
-    return Boolean(process.env.GEMINI_API_KEY);
+  /** Whether some provider with a key is set up for this workspace's service. */
+  isConfigured(orgId: string, service: AiService = 'POST_TEXT'): Promise<boolean> {
+    return this.providers.isConfigured(orgId, service);
   }
 
-  private textModel() {
-    return process.env.GEMINI_TEXT_MODEL || 'gemini-3.8-flash';
-  }
-
-  private imageModel() {
-    return process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image';
-  }
-
-  async generateIdeas(ctx: BusinessContext, count = 4): Promise<StoryIdea[]> {
+  async generateIdeas(orgId: string, ctx: BusinessContext, count = 4): Promise<StoryIdea[]> {
     const prompt = buildIdeasPrompt(ctx, count);
-    const body = {
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.9,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: 'ARRAY',
-          items: {
-            type: 'OBJECT',
-            properties: {
-              title: { type: 'STRING' },
-              label: { type: 'STRING' },
-              idea: { type: 'STRING' },
-              caption: { type: 'STRING' },
-              imagePrompt: { type: 'STRING' },
-              seedKeyword: { type: 'STRING' },
-              offeringId: { type: 'STRING' },
-            },
-            required: ['title', 'label', 'idea', 'caption', 'imagePrompt', 'seedKeyword'],
+    const raw = await this.json<unknown>(orgId, 'POST_TEXT', {
+      prompt,
+      temperature: 0.9,
+      schema: {
+        type: 'ARRAY',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            title: { type: 'STRING' },
+            label: { type: 'STRING' },
+            idea: { type: 'STRING' },
+            caption: { type: 'STRING' },
+            imagePrompt: { type: 'STRING' },
+            seedKeyword: { type: 'STRING' },
+            offeringId: { type: 'STRING' },
           },
+          required: ['title', 'label', 'idea', 'caption', 'imagePrompt', 'seedKeyword'],
         },
       },
-    };
-    const json = await this.call(this.textModel(), body);
-    const text = extractText(json);
-    const ideas = parseIdeas(text);
+    });
+    const ideas = parseIdeas(JSON.stringify(raw));
     if (ideas.length < count) {
-      throw new Error(`Gemini returned ${ideas.length} usable ideas, expected ${count}`);
+      throw new Error(`AI returned ${ideas.length} usable ideas, expected ${count}`);
     }
     return ideas.slice(0, count);
   }
@@ -126,7 +136,7 @@ export class GeminiClient {
    * Apify's trending hashtags are the evidence; Gemini turns them (plus the
    * niche) into search phrases, and works from the niche alone if Apify had none.
    */
-  async trendKeywords(ctx: NicheContext, count = 10): Promise<string[]> {
+  async trendKeywords(orgId: string, ctx: NicheContext, count = 10): Promise<string[]> {
     const prompt = [
       `You research Instagram and Google search trends for small Indian businesses. Today is ${ctx.forDate}.`,
       ctx.industry ? `Industry: ${ctx.industry}` : '',
@@ -141,7 +151,7 @@ export class GeminiClient {
     ]
       .filter(Boolean)
       .join('\n');
-    const phrases = await this.generateJson<string[]>(prompt, {
+    const phrases = await this.generateJson<string[]>(orgId, 'POST_TEXT', prompt, {
       type: 'ARRAY',
       items: { type: 'STRING' },
     });
@@ -151,21 +161,22 @@ export class GeminiClient {
   }
 
   /**
-   * Structured JSON answer from the text model, optionally looking at one
-   * image. Used for tagging posts with catalog items.
+   * Structured JSON answer from the service's text model, optionally looking
+   * at one image. Used for tagging posts with catalog items.
    */
   async generateJson<T>(
+    orgId: string,
+    service: AiService,
     prompt: string,
     responseSchema: unknown,
-    image?: { data: Buffer; mimeType: string },
+    image?: ImagePart,
   ): Promise<T> {
-    const parts: unknown[] = [{ text: prompt }];
-    if (image) parts.push({ inline_data: { mime_type: image.mimeType, data: image.data.toString('base64') } });
-    const json = await this.call(this.textModel(), {
-      contents: [{ role: 'user', parts }],
-      generationConfig: { temperature: 0.1, responseMimeType: 'application/json', responseSchema },
+    return this.json<T>(orgId, service, {
+      prompt,
+      schema: responseSchema,
+      images: image ? [image] : [],
+      temperature: 0.1,
     });
-    return JSON.parse(extractText(json)) as T;
   }
 
   /**
@@ -173,6 +184,7 @@ export class GeminiClient {
    * which catalog item it shows. A caption the seller wrote is kept as is.
    */
   async describeOwnPhoto(
+    orgId: string,
     image: { data: Buffer; mimeType: string },
     ctx: {
       brandName: string;
@@ -202,6 +214,8 @@ export class GeminiClient {
       .filter(Boolean)
       .join('\n');
     const r = await this.generateJson<Partial<OwnPhotoDetails>>(
+      orgId,
+      'POST_TEXT',
       prompt,
       {
         type: 'OBJECT',
@@ -217,9 +231,14 @@ export class GeminiClient {
     );
     const ids = new Set(ctx.products.map((p) => p.id));
     return {
-      title: String(r?.title || '').trim().slice(0, 24),
+      title: String(r?.title || '')
+        .trim()
+        .slice(0, 24),
       caption: (ctx.sellerCaption || String(r?.caption || '')).trim().slice(0, 1000),
-      seedKeyword: String(r?.seedKeyword || '').trim().toLowerCase().slice(0, 60),
+      seedKeyword: String(r?.seedKeyword || '')
+        .trim()
+        .toLowerCase()
+        .slice(0, 60),
       offeringId: r?.offeringId && ids.has(r.offeringId) ? r.offeringId : null,
     };
   }
@@ -229,8 +248,19 @@ export class GeminiClient {
    * when picking it ("red lehenga ke saath"). Without a note the idea is kept.
    */
   async refinePost(
-    idea: { title: string; idea: string; caption: string; imagePrompt: string; seedKeyword: string },
-    ctx: { brandName: string; brandKit?: BrandKit | null; note?: string | null },
+    orgId: string,
+    idea: {
+      title: string;
+      idea: string;
+      caption: string;
+      imagePrompt: string;
+      seedKeyword: string;
+    },
+    ctx: {
+      brandName: string;
+      brandKit?: BrandKit | null;
+      note?: string | null;
+    },
   ): Promise<PostDraft> {
     const prompt = [
       `You write Instagram posts for "${ctx.brandName}", an Indian small business.`,
@@ -247,20 +277,28 @@ export class GeminiClient {
     ]
       .filter(Boolean)
       .join('\n');
-    const r = await this.generateJson<Partial<PostDraft>>(prompt, {
+    const r = await this.generateJson<Partial<PostDraft>>(orgId, 'POST_TEXT', prompt, {
       type: 'OBJECT',
-      properties: { title: { type: 'STRING' }, caption: { type: 'STRING' }, imagePrompt: { type: 'STRING' } },
+      properties: {
+        title: { type: 'STRING' },
+        caption: { type: 'STRING' },
+        imagePrompt: { type: 'STRING' },
+      },
       required: ['title', 'caption', 'imagePrompt'],
     });
     return {
-      title: String(r?.title || idea.title).trim().slice(0, 24),
-      caption: String(r?.caption || idea.caption).trim().slice(0, 1000),
+      title: String(r?.title || idea.title)
+        .trim()
+        .slice(0, 24),
+      caption: String(r?.caption || idea.caption)
+        .trim()
+        .slice(0, 1000),
       imagePrompt: String(r?.imagePrompt || idea.imagePrompt).trim(),
     };
   }
 
   /** What worked on the page: its own posts ranked by likes and comments. */
-  async analyzePosts(brandName: string, posts: PastPost[]): Promise<PostInsights> {
+  async analyzePosts(orgId: string, brandName: string, posts: PastPost[]): Promise<PostInsights> {
     const lines = posts
       .slice(0, 50)
       .map(
@@ -277,7 +315,7 @@ export class GeminiClient {
       '- topTopics: up to 6 short topics that did best',
       '- weakTopics: up to 4 short topics that did worst or are overused',
     ].join('\n');
-    const r = await this.generateJson<Partial<PostInsights>>(prompt, {
+    const r = await this.generateJson<Partial<PostInsights>>(orgId, 'POST_TEXT', prompt, {
       type: 'OBJECT',
       properties: {
         summary: { type: 'STRING' },
@@ -287,7 +325,9 @@ export class GeminiClient {
       required: ['summary', 'topTopics', 'weakTopics'],
     });
     return {
-      summary: String(r?.summary || '').trim().slice(0, 1200),
+      summary: String(r?.summary || '')
+        .trim()
+        .slice(0, 1200),
       topTopics: cleanList(r?.topTopics, 6),
       weakTopics: cleanList(r?.weakTopics, 4),
     };
@@ -295,6 +335,7 @@ export class GeminiClient {
 
   /** A first brand kit from the page's own posts, for the seller to confirm. */
   async suggestBrandKit(
+    orgId: string,
     brandName: string,
     captions: string[],
     images: Array<{ data: Buffer; mimeType: string }>,
@@ -317,171 +358,96 @@ export class GeminiClient {
     ]
       .filter(Boolean)
       .join('\n');
-    const parts: unknown[] = [{ text: prompt }];
-    for (const img of images.slice(0, 4)) {
-      parts.push({ inline_data: { mime_type: img.mimeType, data: img.data.toString('base64') } });
-    }
-    const json = await this.call(this.textModel(), {
-      contents: [{ role: 'user', parts }],
-      generationConfig: {
-        temperature: 0.2,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: 'OBJECT',
-          properties: {
-            themes: { type: 'ARRAY', items: { type: 'STRING' } },
-            colors: { type: 'ARRAY', items: { type: 'STRING' } },
-            visualStyle: { type: 'STRING' },
-            language: { type: 'STRING' },
-            direction: { type: 'STRING' },
-          },
-          required: ['themes', 'colors', 'visualStyle', 'language', 'direction'],
+    const r = await this.json<Partial<BrandKitSuggestion>>(orgId, 'POST_TEXT', {
+      prompt,
+      images: images.slice(0, 4),
+      temperature: 0.2,
+      schema: {
+        type: 'OBJECT',
+        properties: {
+          themes: { type: 'ARRAY', items: { type: 'STRING' } },
+          colors: { type: 'ARRAY', items: { type: 'STRING' } },
+          visualStyle: { type: 'STRING' },
+          language: { type: 'STRING' },
+          direction: { type: 'STRING' },
         },
+        required: ['themes', 'colors', 'visualStyle', 'language', 'direction'],
       },
     });
-    const r = JSON.parse(extractText(json)) as Partial<BrandKitSuggestion>;
     return {
       themes: cleanList(r?.themes, 4),
       colors: cleanList(r?.colors, 4).filter((c) => /^#[0-9a-f]{6}$/i.test(c)),
-      visualStyle: String(r?.visualStyle || '').trim().slice(0, 200),
-      language: String(r?.language || '').trim().slice(0, 40),
-      direction: String(r?.direction || '').trim().slice(0, 500),
+      visualStyle: String(r?.visualStyle || '')
+        .trim()
+        .slice(0, 200),
+      language: String(r?.language || '')
+        .trim()
+        .slice(0, 40),
+      direction: String(r?.direction || '')
+        .trim()
+        .slice(0, 500),
     };
   }
 
   /** Returns raw image bytes (usually PNG) for a vertical story image. */
-  async generateImage(prompt: string): Promise<Buffer> {
-    const body = {
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              text:
-                `${prompt}\n\nVertical 9:16 Instagram story, photorealistic or clean graphic style, ` +
-                'no watermarks, leave the top and bottom 15% free of important detail.',
-            },
-          ],
-        },
-      ],
-      generationConfig: {
-        responseModalities: ['IMAGE'],
-        imageConfig: { aspectRatio: '9:16' },
-      },
-    };
-    return extractImage(await this.call(this.imageModel(), body));
+  async generateImage(orgId: string, prompt: string): Promise<Buffer> {
+    return this.llm.generateImage(
+      await this.ai(orgId, 'POST_IMAGES'),
+      `${prompt}\n\nVertical 9:16 Instagram story, photorealistic or clean graphic style, ` +
+        'no watermarks, leave the top and bottom 15% free of important detail.',
+    );
   }
 
   /** Applies the merchant's WhatsApp instruction ("background golden karo") to a draft. */
-  async editImage(image: Buffer, mimeType: string, instruction: string): Promise<Buffer> {
-    const body = {
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { inlineData: { mimeType, data: image.toString('base64') } },
-            {
-              text:
-                'Edit this Instagram image as the business owner asks, and change nothing else. ' +
-                'The request may be in Hindi, Hinglish or English. Keep it photorealistic, add no text or watermark ' +
-                'unless the request asks for text.\n' +
-                `Request: ${instruction.slice(0, 500)}`,
-            },
-          ],
-        },
-      ],
-      generationConfig: {
-        responseModalities: ['IMAGE'],
-        imageConfig: { aspectRatio: '9:16' },
-      },
-    };
-    return extractImage(await this.call(this.imageModel(), body));
+  async editImage(orgId: string, image: Buffer, mimeType: string, instruction: string): Promise<Buffer> {
+    return this.llm.editImage(
+      await this.ai(orgId, 'POST_IMAGES'),
+      { data: image, mimeType },
+      'Edit this Instagram image as the business owner asks, and change nothing else. ' +
+        'The request may be in Hindi, Hinglish or English. Keep it photorealistic, add no text or watermark ' +
+        'unless the request asks for text.\n' +
+        `Request: ${instruction.slice(0, 500)}`,
+    );
   }
 
-  /** Asks Gemini to letter the keywords and hashtags onto an existing image. */
-  async addTextToImage(image: Buffer, mimeType: string, headline: string, hashtags: string[]): Promise<Buffer> {
+  /** Letters the keywords and hashtags onto an existing image. */
+  async addTextToImage(
+    orgId: string,
+    image: Buffer,
+    mimeType: string,
+    headline: string,
+    hashtags: string[],
+  ): Promise<Buffer> {
     const tags = hashtags.join(' ');
-    const body = {
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { inlineData: { mimeType, data: image.toString('base64') } },
-            {
-              text:
-                'Edit this Instagram story image. Keep the scene exactly as it is. ' +
-                `Add the headline "${headline}" in bold, highly legible lettering near the top, and the hashtags "${tags}" ` +
-                'in a smaller line near the bottom, on a subtle translucent band so the text reads on any background. ' +
-                'Spell every word exactly as given. Add no other text.',
-            },
-          ],
-        },
-      ],
-      generationConfig: {
-        responseModalities: ['IMAGE'],
-        imageConfig: { aspectRatio: '9:16' },
-      },
-    };
-    return extractImage(await this.call(this.imageModel(), body));
+    return this.llm.editImage(
+      await this.ai(orgId, 'POST_IMAGES'),
+      { data: image, mimeType },
+      'Edit this Instagram story image. Keep the scene exactly as it is. ' +
+        `Add the headline "${headline}" in bold, highly legible lettering near the top, and the hashtags "${tags}" ` +
+        'in a smaller line near the bottom, on a subtle translucent band so the text reads on any background. ' +
+        'Spell every word exactly as given. Add no other text.',
+    );
   }
 
-  private fallbackTextModel() {
-    return process.env.GEMINI_TEXT_FALLBACK_MODEL || 'gemini-3.6-flash';
+  private async ai(orgId: string, service: AiService) {
+    const ai = await this.providers.resolve(orgId, service);
+    if (!ai) throw new Error(`No AI provider is connected for ${service}`);
+    return ai;
   }
 
-  private async call(model: string, body: unknown): Promise<any> {
-    try {
-      return await this.callModel(model, body);
-    } catch (err) {
-      // A busy text model can stay busy for minutes; a sibling model usually
-      // has room, so the day's ideas still go out.
-      const fallback = this.fallbackTextModel();
-      if (!(err instanceof GeminiBusyError) || model !== this.textModel() || fallback === model) {
-        throw err;
-      }
-      this.logger.warn(`Gemini ${model} still busy, switching to ${fallback}`);
-      return this.callModel(fallback, body);
-    }
-  }
-
-  private async callModel(model: string, body: unknown): Promise<any> {
-    const key = process.env.GEMINI_API_KEY;
-    if (!key) throw new Error('GEMINI_API_KEY is not set');
-    for (let attempt = 0; ; attempt++) {
-      const res = await fetch(`${API_BASE}/${model}:generateContent`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify(body),
-      });
-      if (res.ok) return res.json();
-      const detail = (await res.text()).slice(0, 500);
-      // Gemini answers 503 "high demand" and 429 rate limits in bursts that
-      // clear within seconds, so a short wait saves the whole daily run.
-      const wait = RETRY_DELAYS_MS[attempt];
-      if (RETRY_STATUSES.has(res.status) && wait !== undefined) {
-        this.logger.warn(`Gemini ${model} busy (${res.status}), retrying in ${wait / 1000}s`);
-        await this.sleep(wait);
-        continue;
-      }
-      this.logger.error(`Gemini ${model} failed (${res.status}): ${detail}`);
-      if (RETRY_STATUSES.has(res.status)) throw new GeminiBusyError(model, res.status);
-      throw new Error(`Gemini ${model} failed with ${res.status}`);
-    }
-  }
-
-  protected sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  private async json<T>(
+    orgId: string,
+    service: AiService,
+    req: {
+      prompt: string;
+      schema: unknown;
+      images?: ImagePart[];
+      temperature?: number;
+    },
+  ): Promise<T> {
+    return this.llm.generateJson<T>(await this.ai(orgId, service), req);
   }
 }
-
-class GeminiBusyError extends Error {
-  constructor(model: string, status: number) {
-    super(`Gemini ${model} failed with ${status}`);
-  }
-}
-
-const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
-const RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
 
 export function buildIdeasPrompt(ctx: BusinessContext, count: number): string {
   const products = ctx.products
@@ -562,13 +528,7 @@ function cleanList(value: unknown, max: number): string[] {
     .slice(0, max);
 }
 
-export function extractText(json: any): string {
-  const parts = json?.candidates?.[0]?.content?.parts || [];
-  return parts
-    .map((p: any) => p?.text || '')
-    .join('')
-    .trim();
-}
+export const extractText = extractGeminiText;
 
 export function parseIdeas(text: string): StoryIdea[] {
   let raw: unknown;
@@ -601,12 +561,4 @@ export function parseIdeas(text: string): StoryIdea[] {
     .filter((r) => r.title && r.idea && r.imagePrompt && r.seedKeyword);
 }
 
-export function extractImage(json: any): Buffer {
-  const parts = json?.candidates?.[0]?.content?.parts || [];
-  for (const p of parts) {
-    const data = p?.inlineData?.data || p?.inline_data?.data;
-    if (data) return Buffer.from(data, 'base64');
-  }
-  const reason = json?.candidates?.[0]?.finishReason || json?.promptFeedback?.blockReason || 'no image part';
-  throw new Error(`Gemini returned no image (${reason})`);
-}
+export const extractImage = extractGeminiImage;

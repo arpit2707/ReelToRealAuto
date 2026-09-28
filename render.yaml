@@ -45,6 +45,10 @@ services:
       # stays idle until these are set.
       - key: GEMINI_API_KEY
         sync: false
+      # Superadmin dashboard (/admin): comma separated emails. AI keys for
+      # OpenAI, Gemini and Claude can also be connected there instead of env.
+      - key: SUPERADMIN_EMAILS
+        sync: false
       - key: SEMRUSH_API_KEY
         sync: false
       - key: APIFY_TOKEN

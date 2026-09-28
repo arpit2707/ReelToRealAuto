@@ -87,6 +87,8 @@ model Organization {
   commentThreads    CommentThread[]
   commentReplyJobs  CommentReplyJob[]
   dmSpotlights      DmSpotlight[]
+  aiProviderKeys    AiProviderKey[]
+  aiServiceSettings AiServiceSetting[]
 }
 
 model OrganizationMember {
@@ -956,4 +958,52 @@ model Lead {
 
   @@unique([conversationId, offeringId])
   @@index([orgId, status, createdAt])
+}
+
+// An API key for an AI provider (OPENAI | GEMINI | CLAUDE). orgId null is the
+// platform key the superadmin connected; otherwise the workspace's own key.
+model AiProviderKey {
+  id        String        @id @default(uuid())
+  orgId     String?
+  org       Organization? @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  provider  String
+  apiKeyEnc String
+  // Last characters of the key, to recognise it without decrypting.
+  keyHint   String
+  // Text model override for this key; the provider default when empty.
+  model     String?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@unique([orgId, provider])
+}
+
+// Which provider runs one AI service (POST_TEXT, POST_IMAGES, POST_TAGGING,
+// DM_REPLIES). orgId null is the platform choice; a workspace row is its own
+// choice and only counts when the platform row lets tenants choose.
+model AiServiceSetting {
+  id              String        @id @default(uuid())
+  orgId           String?
+  org             Organization? @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  service         String
+  provider        String
+  model           String?
+  tenantCanChoose Boolean       @default(false)
+  updatedAt       DateTime      @updatedAt
+
+  @@unique([orgId, service])
+}
+
+// Every superadmin action: logging in as a user, changing AI keys or services.
+model AdminAuditLog {
+  id           String   @id @default(uuid())
+  actorUserId  String
+  actorEmail   String
+  action       String
+  targetOrgId  String?
+  targetUserId String?
+  meta         Json?
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
 }

@@ -19,6 +19,8 @@ import { StoriesModule } from './modules/stories/stories.module';
 import { PostsModule } from './modules/posts/posts.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
+import { AiProvidersModule } from './modules/ai-providers/ai-providers.module';
+import { AdminModule } from './modules/admin/admin.module';
 
 @Module({
   imports: [
@@ -38,6 +40,8 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
     StoriesModule,
     PostsModule,
     CatalogModule,
+    AiProvidersModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -6,6 +6,8 @@ export type JwtPayload = {
   orgId: string;
   role: string;
   email: string;
+  // Set when a superadmin logged in as this user: who they really are.
+  imp?: { sub: string; email: string };
 };
 
 function secret(): string {
@@ -18,6 +20,12 @@ function secret(): string {
 
 export function signAuthToken(payload: JwtPayload): string {
   return jwt.sign(payload, secret(), { expiresIn: '15m' });
+}
+
+/** A superadmin's "login as user" session: one hour, and never refreshed. */
+export const IMPERSONATION_SECONDS = 60 * 60;
+export function signImpersonationToken(payload: JwtPayload & { imp: { sub: string; email: string } }): string {
+  return jwt.sign(payload, secret(), { expiresIn: IMPERSONATION_SECONDS });
 }
 
 export function signRefreshToken(payload: { sub: string }): string {
