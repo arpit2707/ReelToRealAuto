@@ -140,14 +140,18 @@ export class LlmClient {
         },
       });
     }
-    const json = await this.gemini(ai, {
-      contents: [{ role: 'user', parts }],
-      generationConfig: {
-        temperature: req.temperature ?? 0.2,
-        responseMimeType: 'application/json',
-        responseSchema: req.schema,
+    const json = await this.gemini(
+      ai,
+      {
+        contents: [{ role: 'user', parts }],
+        generationConfig: {
+          temperature: req.temperature ?? 0.2,
+          responseMimeType: 'application/json',
+          responseSchema: req.schema,
+        },
       },
-    });
+      true,
+    );
     return JSON.parse(extractGeminiText(json)) as T;
   }
 
@@ -225,27 +229,60 @@ export class LlmClient {
     return (wrapped ? block.input?.result : block.input) as T;
   }
 
-  private gemini(ai: ResolvedAi, body: unknown): Promise<any> {
-    return this.request(ai.provider, ai.model, `${GEMINI_BASE}/${ai.model}:generateContent`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': ai.apiKey,
-      },
-      body: JSON.stringify(body),
-    });
+  private async gemini(ai: ResolvedAi, body: unknown, text = false): Promise<any> {
+    const call = (model: string) =>
+      this.request(ai.provider, model, `${GEMINI_BASE}/${model}:generateContent`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': ai.apiKey,
+        },
+        body: JSON.stringify(body),
+      });
+    try {
+      return await call(ai.model);
+    } catch (err) {
+      // A busy text model can stay busy for minutes; a sibling model usually
+      // has room, so the day's ideas still go out.
+      const fallback = process.env.GEMINI_TEXT_FALLBACK_MODEL || 'gemini-3.6-flash';
+      if (!(err instanceof AiBusyError) || !text || fallback === ai.model) throw err;
+      this.logger.warn(`Gemini ${ai.model} still busy, switching to ${fallback}`);
+      return call(fallback);
+    }
   }
 
   private async request(provider: string, model: string, url: string, init: RequestInit): Promise<any> {
-    const res = await fetch(url, init);
-    if (!res.ok) {
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(url, init);
+      if (res.ok) return res.json();
       const detail = (await res.text()).slice(0, 500);
+      // Providers answer 503 "high demand" and 429 rate limits in bursts that
+      // clear within seconds, so a short wait saves the whole daily run.
+      const wait = RETRY_DELAYS_MS[attempt];
+      if (RETRY_STATUSES.has(res.status) && wait !== undefined) {
+        this.logger.warn(`${provider} ${model} busy (${res.status}), retrying in ${wait / 1000}s`);
+        await this.sleep(wait);
+        continue;
+      }
       this.logger.error(`${provider} ${model} failed (${res.status}): ${detail}`);
+      if (RETRY_STATUSES.has(res.status)) throw new AiBusyError(provider, model, res.status);
       throw new Error(`${provider} ${model} failed with ${res.status}`);
     }
-    return res.json();
+  }
+
+  protected sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
+
+class AiBusyError extends Error {
+  constructor(provider: string, model: string, status: number) {
+    super(`${provider} ${model} failed with ${status}`);
+  }
+}
+
+const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
+const RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
 
 /** Gemini's schema dialect as JSON Schema. */
 export function toJsonSchema(schema: any): any {
