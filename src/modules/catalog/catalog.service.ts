@@ -9,8 +9,10 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import {
   INDUSTRIES,
+  OFFER_TYPES,
   OFFERING_TYPES,
   PRICE_MODES,
+  defaultOfferType,
   industryOf,
 } from './industries';
 import { parseCsv } from './csv';
@@ -73,6 +75,8 @@ export type ProfileInput = {
   language?: string | null;
   replyLanguage?: string | null;
   services?: string[];
+  // PRODUCTS | SERVICES | BOTH: what the business sells.
+  offerType?: string | null;
   // True finishes setup and switches the chosen automations on.
   completeOnboarding?: boolean;
 };
@@ -85,6 +89,10 @@ export type PageProfileInput = {
   language?: string | null;
   faqs?: Array<{ q: string; a: string }> | null;
   offeringIds?: string[];
+  // PRODUCTS | SERVICES | BOTH; empty follows the business profile.
+  offerType?: string | null;
+  // Examples the AI offers in an open question ("bridal makeup", "lehenga").
+  categories?: string[];
 };
 
 const OFFERING_INCLUDE = {
@@ -111,14 +119,18 @@ export class CatalogService {
       where: { orgId },
     });
     return {
-      profile: profile ?? {
-        orgId,
-        industry: 'APPAREL',
-        serviceAreas: [],
-        autoTagPosts: true,
-        services: [],
-        activatedAt: null,
-      },
+      profile: profile
+        ? { ...profile, offerType: profile.offerType || defaultOfferType(profile.industry) }
+        : {
+            orgId,
+            industry: 'APPAREL',
+            serviceAreas: [],
+            autoTagPosts: true,
+            services: [],
+            activatedAt: null,
+            offerType: null,
+          },
+      offerTypes: OFFER_TYPES,
       onboarding: onboardingStatus(profile),
       template: industryOf(profile?.industry),
       services: SERVICES,
@@ -141,6 +153,9 @@ export class CatalogService {
     const language = input.language ?? input.replyLanguage;
     if (language && !LANGUAGES.includes(language)) {
       throw new BadRequestException(`Unknown language ${language}`);
+    }
+    if (input.offerType && !(OFFER_TYPES as readonly string[]).includes(input.offerType)) {
+      throw new BadRequestException(`Unknown offer type ${input.offerType}`);
     }
     const unknown = (input.services || []).filter(
       (c) => !SERVICES.some((s) => s.code === c),
@@ -174,6 +189,7 @@ export class CatalogService {
       language: input.language ?? input.replyLanguage,
       replyLanguage: input.replyLanguage ?? input.language,
       services: input.services ? [...new Set(input.services)] : undefined,
+      offerType: input.offerType === undefined ? undefined : input.offerType || null,
     };
     if (input.completeOnboarding) {
       const existing = await this.prisma.businessProfile.findUnique({
@@ -190,6 +206,16 @@ export class CatalogService {
       }
     }
     const onboardedAt = input.completeOnboarding ? new Date() : undefined;
+    // The dashboard asks "Aap kya bechte hain?"; older clients fall back to
+    // what the industry usually sells.
+    if (input.completeOnboarding && !data.offerType) {
+      const current = await this.prisma.businessProfile.findUnique({
+        where: { orgId },
+        select: { offerType: true, industry: true },
+      });
+      if (!current?.offerType)
+        data.offerType = defaultOfferType(input.industry ?? current?.industry);
+    }
     await this.prisma.businessProfile.upsert({
       where: { orgId },
       update: {
@@ -279,6 +305,13 @@ export class CatalogService {
     if (language && !LANGUAGES.includes(language)) {
       throw new BadRequestException(`Unknown language ${language}`);
     }
+    const offerType = input.offerType?.trim() || null;
+    if (offerType && !(OFFER_TYPES as readonly string[]).includes(offerType)) {
+      throw new BadRequestException(`Unknown offer type ${offerType}`);
+    }
+    const categories = [
+      ...new Set((input.categories || []).map((c) => String(c).trim().slice(0, 40)).filter(Boolean)),
+    ].slice(0, 20);
     const offeringIds = [...new Set(input.offeringIds || [])];
     if (offeringIds.length) {
       const found = await this.prisma.offering.count({
@@ -299,9 +332,18 @@ export class CatalogService {
       language,
       faqs: faqs.length ? (faqs as Prisma.InputJsonValue) : Prisma.DbNull,
       offeringIds,
+      offerType,
+      categories,
     };
     const empty =
-      !data.description && !data.audience && !tone && !language && !faqs.length && !offeringIds.length;
+      !data.description &&
+      !data.audience &&
+      !tone &&
+      !language &&
+      !faqs.length &&
+      !offeringIds.length &&
+      !offerType &&
+      !categories.length;
     if (empty) {
       // Nothing overridden: the page simply follows the business profile again.
       await this.prisma.pageProfile.deleteMany({ where: { channelId, orgId } });

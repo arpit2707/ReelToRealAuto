@@ -57,6 +57,8 @@ export interface GeneratedReplyResult {
   // Why the AI handed over: human_request, complaint, order_support,
   // purchase_assistance, missing_information, generation_unavailable, …
   handoff_reason?: string | null;
+  // PRODUCTS or SERVICES once a customer on a "both" page made it clear.
+  offering_type?: string | null;
 }
 
 @Injectable()

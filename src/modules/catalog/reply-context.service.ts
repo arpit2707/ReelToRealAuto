@@ -1,13 +1,21 @@
 import { Injectable, Optional } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CatalogService } from './catalog.service';
-import { industryOf, priceLabel, type IndustryTemplate } from './industries';
+import {
+  defaultOfferType,
+  industryOf,
+  offeringKind,
+  priceLabel,
+  type IndustryTemplate,
+} from './industries';
 import { PostAiGateService } from './post-ai-gate.service';
 
 // Suggested links below this confidence are ignored until the seller confirms
 // them, so a wrong guess does not put the wrong price in front of a customer.
 const MIN_SUGGESTED_CONFIDENCE = 0.6;
 const MAX_OFFERINGS = 5;
+// Background items for an open question ("hi", "price list").
+const MAX_OVERVIEW = 8;
 // A post mentioned in a chat stays its topic for this long.
 export const POST_MEMORY_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -76,6 +84,9 @@ export type ReplyContext = {
     hours: string | null;
     policies: Record<string, string> | null;
     faqs: Array<{ q: string; a: string }>;
+    // What this page sells, and examples for an open question.
+    offer_type: 'PRODUCTS' | 'SERVICES' | 'BOTH';
+    categories: string[];
   };
   playbook: {
     goal: string;
@@ -208,13 +219,28 @@ export class ReplyContextService {
       pageItems,
     );
 
-    const orderedIds = [
+    const offerType = (page?.offerType ||
+      profile?.offerType ||
+      defaultOfferType(profile?.industry)) as 'PRODUCTS' | 'SERVICES' | 'BOTH';
+    // On a page that sells both, what the customer said they want.
+    const wants =
+      offerType === 'BOTH'
+        ? goalState.offeringType
+        : offerType;
+
+    let orderedIds = [
       ...new Set([
         ...linkedIds,
         ...rememberedIds,
         ...searched.map((s) => s.id),
       ]),
     ].slice(0, MAX_OFFERINGS);
+    // Nothing matched ("hi", "price list", "kya naya hai"): a few items of the
+    // right kind as background for an open question, no prices pushed.
+    const overviewIds = orderedIds.length
+      ? []
+      : await this.overview(input.orgId, pageItems, wants);
+    if (!orderedIds.length) orderedIds = overviewIds;
     const rows = orderedIds.length
       ? await this.prisma.offering.findMany({
           where: { id: { in: orderedIds }, orgId: input.orgId, isActive: true },
@@ -259,7 +285,9 @@ export class ReplyContextService {
           ? 'post'
           : rememberedIds.includes(o.id)
             ? 'chat'
-            : 'search') as OfferingMatch,
+            : overviewIds.includes(o.id)
+              ? 'overview'
+              : 'search') as OfferingMatch,
         ...(availability.length
           ? {
               availability: availability
@@ -299,6 +327,8 @@ export class ReplyContextService {
           ...((page?.faqs as Array<{ q: string; a: string }> | null) || []),
           ...((profile?.faqs as Array<{ q: string; a: string }> | null) || []),
         ].slice(0, 12),
+        offer_type: offerType,
+        categories: page?.categories || [],
       },
       playbook: {
         goal: template.goal,
@@ -332,6 +362,28 @@ export class ReplyContextService {
       template,
       allowed_prices: [...allowed],
     };
+  }
+
+  /** Newest active items of the kind the page (or customer) wants. */
+  private async overview(
+    orgId: string,
+    onlyIds: string[] | null,
+    wants: string | undefined,
+  ): Promise<string[]> {
+    const rows = await this.prisma.offering.findMany({
+      where: {
+        orgId,
+        isActive: true,
+        ...(onlyIds?.length ? { id: { in: onlyIds } } : {}),
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 50,
+      select: { id: true, type: true },
+    });
+    return rows
+      .filter((r) => !wants || wants === 'BOTH' || offeringKind(r.type) === wants)
+      .slice(0, MAX_OVERVIEW)
+      .map((r) => r.id);
   }
 
   private async linkedOfferingIds(orgId: string, postId: string) {

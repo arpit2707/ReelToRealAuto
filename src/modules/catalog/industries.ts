@@ -266,3 +266,25 @@ export function priceLabel(o: {
       return base;
   }
 }
+
+// ------------------------------------------------------------- offer type
+
+export const OFFER_TYPES = ['PRODUCTS', 'SERVICES', 'BOTH'] as const;
+export type OfferType = (typeof OFFER_TYPES)[number];
+
+const PRODUCT_INDUSTRIES = ['APPAREL', 'FOOTWEAR', 'FOOD'];
+const SERVICE_INDUSTRIES = ['BEAUTY_SERVICE', 'HOTEL', 'TRAVEL', 'REAL_ESTATE'];
+
+/** What a business sells when the seller has not said (matches the backfill). */
+export function defaultOfferType(industry: string | null | undefined): OfferType {
+  if (PRODUCT_INDUSTRIES.includes(industry || '')) return 'PRODUCTS';
+  if (SERVICE_INDUSTRIES.includes(industry || '')) return 'SERVICES';
+  return 'BOTH';
+}
+
+// Offering types that count as a product; everything else is a service.
+const PRODUCT_TYPES = ['PRODUCT', 'MENU_ITEM'];
+
+export function offeringKind(type: string): 'PRODUCTS' | 'SERVICES' {
+  return PRODUCT_TYPES.includes(type) ? 'PRODUCTS' : 'SERVICES';
+}

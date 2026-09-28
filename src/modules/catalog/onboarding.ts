@@ -39,6 +39,7 @@ export const MIN_DESCRIPTION = 20;
 export const MIN_DESCRIPTION_LENGTH = 30;
 
 export type ProfileLike = {
+  offerType?: string | null;
   businessName?: string | null;
   description?: string | null;
   industry?: string | null;

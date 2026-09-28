@@ -64,6 +64,25 @@ export const PAUSING_REASONS = [
   'crisis',
 ];
 
+/**
+ * Where the conversation is: DISCOVER (finding out what they want) -> QUOTE
+ * (items and prices shown) -> COLLECT (asking lead details) -> DONE (lead in).
+ * It never moves backwards on a hiccup such as a hand-off.
+ */
+export function nextStage(
+  previous: string | undefined,
+  outcome: { action?: string | null; offering_ids?: string[] | null },
+  hasFields: boolean,
+): string {
+  const order = ['DISCOVER', 'QUOTE', 'COLLECT', 'DONE'];
+  let stage = 'DISCOVER';
+  if (outcome.action === 'CREATE_LEAD') stage = 'DONE';
+  else if (outcome.action === 'ASK_FIELD' || hasFields) stage = 'COLLECT';
+  else if (outcome.action === 'SEND_LINK' || (outcome.offering_ids || []).length) stage = 'QUOTE';
+  const prev = order.indexOf(previous || 'DISCOVER');
+  return order[Math.max(prev, order.indexOf(stage))];
+}
+
 /** True while the AI must stay quiet in this chat. */
 export function chatPaused(
   convo: { aiEnabled: boolean; goalState: unknown } | null | undefined,
@@ -366,12 +385,17 @@ export class ReplyEngineService {
         )
         .map(([k, v]) => [k, String(v).trim().slice(0, 120)]),
     );
+    const fields = { ...(previous.fields || {}), ...collected };
     const next: GoalState = {
       ...previous,
       offeringIds: outcome.offering_ids.length
         ? outcome.offering_ids
         : previous.offeringIds,
-      fields: { ...(previous.fields || {}), ...collected },
+      fields,
+      ...(outcome.offering_type === 'PRODUCTS' || outcome.offering_type === 'SERVICES'
+        ? { offeringType: outcome.offering_type }
+        : {}),
+      stage: nextStage(previous.stage, outcome, Object.keys(fields).length > 0),
       // Shown as "Needs you" in the inbox until the seller replies or resumes.
       ...(outcome.action === 'HANDOFF'
         ? {
