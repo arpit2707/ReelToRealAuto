@@ -425,7 +425,26 @@ export class GeminiClient {
     return extractImage(await this.call(this.imageModel(), body));
   }
 
+  private fallbackTextModel() {
+    return process.env.GEMINI_TEXT_FALLBACK_MODEL || 'gemini-3.6-flash';
+  }
+
   private async call(model: string, body: unknown): Promise<any> {
+    try {
+      return await this.callModel(model, body);
+    } catch (err) {
+      // A busy text model can stay busy for minutes; a sibling model usually
+      // has room, so the day's ideas still go out.
+      const fallback = this.fallbackTextModel();
+      if (!(err instanceof GeminiBusyError) || model !== this.textModel() || fallback === model) {
+        throw err;
+      }
+      this.logger.warn(`Gemini ${model} still busy, switching to ${fallback}`);
+      return this.callModel(fallback, body);
+    }
+  }
+
+  private async callModel(model: string, body: unknown): Promise<any> {
     const key = process.env.GEMINI_API_KEY;
     if (!key) throw new Error('GEMINI_API_KEY is not set');
     for (let attempt = 0; ; attempt++) {
@@ -445,12 +464,19 @@ export class GeminiClient {
         continue;
       }
       this.logger.error(`Gemini ${model} failed (${res.status}): ${detail}`);
+      if (RETRY_STATUSES.has(res.status)) throw new GeminiBusyError(model, res.status);
       throw new Error(`Gemini ${model} failed with ${res.status}`);
     }
   }
 
   protected sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+}
+
+class GeminiBusyError extends Error {
+  constructor(model: string, status: number) {
+    super(`Gemini ${model} failed with ${status}`);
   }
 }
 

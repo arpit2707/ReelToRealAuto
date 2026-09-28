@@ -95,6 +95,7 @@ Override the name or language with `STORY_WA_TEMPLATE` / `STORY_WA_TEMPLATE_LANG
 | --- | --- | --- |
 | `GEMINI_API_KEY` | Render | Ideas and images (Google AI Studio) |
 | `GEMINI_TEXT_MODEL`, `GEMINI_IMAGE_MODEL` | Render, optional | Defaults `gemini-3.8-flash`, `gemini-2.5-flash-image` |
+| `GEMINI_TEXT_FALLBACK_MODEL` | Render, optional | Text model tried when the main one stays busy (429/5xx) after retries. Default `gemini-3.6-flash` |
 | `SEMRUSH_API_KEY` | Render | Keyword volume (needs API units) |
 | `APIFY_TOKEN` | Render | Instagram hashtag research |
 | `APIFY_HASHTAG_ACTOR` | Render, optional | Default `apify~instagram-hashtag-scraper` |

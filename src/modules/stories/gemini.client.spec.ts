@@ -149,6 +149,26 @@ describe('Gemini helpers', () => {
       expect(fetchSpy).toHaveBeenCalledTimes(4);
     });
 
+    it('switches a still-busy text model to the fallback model', async () => {
+      process.env.GEMINI_TEXT_MODEL = 'main-model';
+      process.env.GEMINI_TEXT_FALLBACK_MODEL = 'spare-model';
+      try {
+        fetchSpy
+          .mockResolvedValueOnce(reply(503))
+          .mockResolvedValueOnce(reply(503))
+          .mockResolvedValueOnce(reply(503))
+          .mockResolvedValueOnce(reply(503))
+          .mockResolvedValueOnce(reply(200));
+        const { c } = await client();
+        await expect(c.call('main-model', {})).resolves.toEqual({ ok: true });
+        expect(fetchSpy).toHaveBeenCalledTimes(5);
+        expect(String(fetchSpy.mock.calls[4][0])).toContain('spare-model');
+      } finally {
+        delete process.env.GEMINI_TEXT_MODEL;
+        delete process.env.GEMINI_TEXT_FALLBACK_MODEL;
+      }
+    });
+
     it('does not retry a bad request', async () => {
       fetchSpy.mockResolvedValue(reply(400));
       const { c, sleep } = await client();
