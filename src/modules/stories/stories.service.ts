@@ -1,12 +1,13 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { MetaPublisherService } from '../meta-publisher/meta-publisher.service';
 import { timingSafeEqualString } from '../../common/hmac';
-import { reel2realSender, type WaSender } from '../../common/wa-sender';
-import { GeminiClient } from './gemini.client';
+import { reel2realSender, setChannelSender, type WaSender } from '../../common/wa-sender';
+import { brandImageStyle, GeminiClient, type BrandKit } from './gemini.client';
 import { KeywordResearchService } from './keyword-research.service';
+import { MediaStore } from './media-store';
 import { overlayText, toFeedJpeg, toPaddedStoryJpeg, toStoryJpeg } from './story-image';
 import { toReelMp4 } from './story-video';
 import { MIN_POST_CONTEXT } from '../catalog/post-ai-gate.service';
@@ -29,14 +30,34 @@ const CAPTION_PREFIX = 'STORY_CAP_';
 const EDIT_CANCEL_PREFIX = 'STORY_EDITX_';
 // "Skip" on the "tell us about this post" question after a daily post goes live.
 const CONTEXT_SKIP_PREFIX = 'STORY_CTXSKIP_';
+// A ROUND's text ideas: a list row picks one; "1,3 red wala" picks several.
+const CONTEXT_PREFIX = 'STORY_CTX_';
+// Approve buttons on a post made from a picked idea: as a post, or as a story.
+const AS_POST_PREFIX = 'STORY_ASPOST_';
+const AS_STORY_PREFIX = 'STORY_ASSTORY_';
 // How long a free-text WhatsApp message is read as that post's context.
 export const CONTEXT_WAIT_MS = 48 * 60 * 60 * 1000;
-const OPTION_PREFIXES = [POST_PREFIX, PICK_PREFIX, EDIT_PREFIX, CAPTION_PREFIX, NOW_PREFIX, TOMORROW_PREFIX];
+const OPTION_PREFIXES = [
+  POST_PREFIX,
+  PICK_PREFIX,
+  EDIT_PREFIX,
+  CAPTION_PREFIX,
+  NOW_PREFIX,
+  TOMORROW_PREFIX,
+  AS_POST_PREFIX,
+  AS_STORY_PREFIX,
+  CONTEXT_PREFIX,
+];
 // Statuses from which the merchant may still pick (or re-pick); FAILED lets them retry.
 const PICKABLE = ['NOTIFIED', 'AWAITING_PICK', 'SCHEDULED', 'FAILED'];
 // "Send today's ideas now" must not throw away a pick or a post that went out.
-const KEEP_ON_REGENERATE = ['GENERATING', 'SCHEDULED', 'PUBLISHING', 'PUBLISHED'];
+const KEEP_ON_REGENERATE = ['GENERATING', 'SCHEDULED', 'PUBLISHING', 'PUBLISHED', 'PICKED'];
 const PICK_WINDOW_MS = 36 * 60 * 60 * 1000;
+export const FLOWS = ['CONTEXTS', 'IMAGES'] as const;
+const MAX_CADENCE_DAYS = 7;
+const INSIGHTS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MIN_POSTS_FOR_INSIGHTS = 3;
+const SKIP_ROUND_TEXT = /^(skip|aaj nahi|aaj nahin|nahi chahiye|no|none|koi nahi|kuch nahi)[.!\s]*$/i;
 // The "you have not picked yet" nudge goes out this long before the posting time.
 const REMIND_BEFORE_MS = 2 * 60 * 60 * 1000;
 const MAX_SCHEDULE_AHEAD_MS = 30 * 24 * 60 * 60 * 1000;
@@ -85,7 +106,7 @@ type OptionCard = {
  * schedule it, and do all of this from the dashboard as well.
  */
 @Injectable()
-export class StoriesService {
+export class StoriesService implements OnModuleInit {
   private readonly logger = new Logger(StoriesService.name);
   private dailyRunning = false;
 
@@ -95,7 +116,32 @@ export class StoriesService {
     private readonly metaPublisher: MetaPublisherService,
     private readonly gemini: GeminiClient,
     private readonly keywords: KeywordResearchService,
+    private readonly media: MediaStore,
   ) {}
+
+  async onModuleInit() {
+    await this.loadChannelSender().catch((e) => this.logger.warn(`WhatsApp sender lookup failed: ${e.message}`));
+  }
+
+  /**
+   * When only STORY_WA_PHONE_NUMBER_ID is set (no token in the environment),
+   * the token comes from that number's WhatsApp channel connected in the
+   * dashboard, so no secret has to be copied into Render.
+   */
+  async loadChannelSender() {
+    const phoneNumberId = process.env.STORY_WA_PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    if (!phoneNumberId || process.env.STORY_WA_ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN) return;
+    const channel = await this.prisma.channel.findFirst({
+      where: { platform: 'WHATSAPP', channelIdentifier: phoneNumberId, isActive: true },
+      orderBy: { updatedAt: 'desc' },
+      select: { accessTokenEncrypted: true },
+    });
+    if (!channel?.accessTokenEncrypted) {
+      this.logger.warn(`No connected WhatsApp channel for sender ${phoneNumberId}`);
+      return;
+    }
+    setChannelSender({ phoneNumberId, accessToken: this.crypto.decrypt(channel.accessTokenEncrypted) });
+  }
 
   // ---------------------------------------------------------------- settings
 
@@ -117,6 +163,15 @@ export class StoriesService {
         optionCount: OPTION_COUNT,
         destinations: ['IG_STORY'],
         nicheKeywords: [],
+        flow: 'CONTEXTS',
+        cadenceDays: 1,
+        maxPicks: 3,
+        brandColors: [],
+        brandThemes: [],
+        visualStyle: null,
+        brandDirection: null,
+        contentLanguage: null,
+        avoidTopics: [],
       }
     );
   }
@@ -135,9 +190,49 @@ export class StoriesService {
       optionCount?: number;
       destinations?: string[];
       nicheKeywords?: string[];
+      flow?: string;
+      cadenceDays?: number;
+      maxPicks?: number;
+      brandColors?: string[];
+      brandThemes?: string[];
+      visualStyle?: string | null;
+      brandDirection?: string | null;
+      contentLanguage?: string | null;
+      avoidTopics?: string[];
     },
   ) {
     const data: Record<string, unknown> = {};
+    if (input.flow !== undefined) {
+      const flow = String(input.flow).toUpperCase();
+      if (!(FLOWS as readonly string[]).includes(flow)) throw new BadRequestException(`flow must be ${FLOWS.join(' or ')}`);
+      data.flow = flow;
+    }
+    for (const [key, max] of [
+      ['cadenceDays', MAX_CADENCE_DAYS],
+      ['maxPicks', MAX_OPTIONS],
+    ] as const) {
+      if (input[key] === undefined) continue;
+      const n = Number(input[key]);
+      if (!Number.isInteger(n) || n < 1 || n > max) throw new BadRequestException(`${key} must be between 1 and ${max}`);
+      data[key] = n;
+    }
+    if (input.brandColors !== undefined) {
+      const colors = cleanList(input.brandColors, 5, 7).map((c) => c.toLowerCase());
+      if (colors.some((c) => !/^#[0-9a-f]{6}$/.test(c))) {
+        throw new BadRequestException('Brand colours must look like #c2185b');
+      }
+      data.brandColors = colors;
+    }
+    if (input.brandThemes !== undefined) data.brandThemes = cleanList(input.brandThemes, 8, 60);
+    if (input.avoidTopics !== undefined) data.avoidTopics = cleanList(input.avoidTopics, 10, 60);
+    for (const [key, max] of [
+      ['visualStyle', 300],
+      ['brandDirection', 1000],
+      ['contentLanguage', 40],
+    ] as const) {
+      if (input[key] === undefined) continue;
+      data[key] = input[key]?.trim().slice(0, max) || null;
+    }
     if (input.enabled !== undefined) data.enabled = Boolean(input.enabled);
     if (input.whatsappNumber !== undefined) data.whatsappNumber = normalizeWhatsAppNumber(input.whatsappNumber);
     if (input.businessDescription !== undefined) {
@@ -199,7 +294,7 @@ export class StoriesService {
     });
   }
 
-  async listBatches(orgId: string, take = 10) {
+  async listBatches(orgId: string, take = 20) {
     const batches = await this.prisma.storyBatch.findMany({
       where: { orgId },
       orderBy: { createdAt: 'desc' },
@@ -230,7 +325,7 @@ export class StoriesService {
       ...b,
       options: b.options.map((o) => ({
         ...o,
-        imageUrl: this.mediaUrl(o.id, 'draft', o.revision),
+        imageUrl: b.kind === 'ROUND' ? null : this.mediaUrl(o.id, 'draft', o.revision),
         finalImageUrl: b.selectedOptionId === o.id && b.status === 'PUBLISHED' ? this.mediaUrl(o.id, 'final') : null,
       })),
     };
@@ -250,11 +345,13 @@ export class StoriesService {
     if (this.dailyRunning) return { started: false, orgs: 0, published: 0, reminded: 0 };
     this.dailyRunning = true;
     try {
+      await this.loadChannelSender().catch((e) => this.logger.warn(`WhatsApp sender lookup failed: ${e.message}`));
       const settings = await this.prisma.storySettings.findMany({
         where: { enabled: true, whatsappNumber: { not: null } },
         select: {
           orgId: true,
           sendTime: true,
+          cadenceDays: true,
           org: { select: { timezone: true } },
         },
       });
@@ -262,11 +359,22 @@ export class StoriesService {
       for (const s of settings) {
         const tz = s.org?.timezone || 'Asia/Kolkata';
         if (localTime(tz, now) < (s.sendTime || '09:00')) continue;
-        const today = await this.prisma.storyBatch.findFirst({
-          where: { orgId: s.orgId, forDate: localDate(tz, now), kind: 'DAILY' },
+        const today = localDate(tz, now);
+        const todays = await this.prisma.storyBatch.findFirst({
+          where: { orgId: s.orgId, forDate: today, kind: { in: ROUND_KINDS } },
           select: { id: true },
         });
-        if (today) continue;
+        if (todays) continue;
+        // Every N days: the latest round that went out (a failed one does not count).
+        const cadence = Math.max(1, s.cadenceDays || 1);
+        if (cadence > 1) {
+          const last = await this.prisma.storyBatch.findFirst({
+            where: { orgId: s.orgId, kind: { in: ROUND_KINDS }, status: { not: 'FAILED' } },
+            orderBy: { forDate: 'desc' },
+            select: { forDate: true },
+          });
+          if (last && daysBetween(last.forDate, today) < cadence) continue;
+        }
         orgs += 1;
         try {
           await this.generateBatch(s.orgId);
@@ -295,7 +403,7 @@ export class StoriesService {
       select: { timezone: true },
     });
     const today = await this.prisma.storyBatch.findFirst({
-      where: { orgId, forDate: localDate(org?.timezone || 'Asia/Kolkata'), kind: 'DAILY' },
+      where: { orgId, forDate: localDate(org?.timezone || 'Asia/Kolkata'), kind: { in: ROUND_KINDS } },
       select: { status: true },
     });
     if (today && KEEP_ON_REGENERATE.includes(today.status)) {
@@ -336,8 +444,10 @@ export class StoriesService {
 
     const forDate = localDate(org.timezone || 'Asia/Kolkata');
     const existing = await this.prisma.storyBatch.findFirst({
-      where: { orgId, forDate, kind: 'DAILY' },
+      where: { orgId, forDate, kind: { in: ROUND_KINDS } },
     });
+    // CONTEXTS: send the ideas as text and draw only what the seller picks.
+    const textFirst = settings.flow === 'CONTEXTS';
     if (existing && existing.status !== 'FAILED' && !opts.force) return existing;
     if (existing && KEEP_ON_REGENERATE.includes(existing.status)) {
       throw new BadRequestException(regenerateBlockedMessage(existing.status));
@@ -348,14 +458,14 @@ export class StoriesService {
       data: {
         orgId,
         forDate,
-        kind: 'DAILY',
+        kind: textFirst ? 'ROUND' : 'DAILY',
         status: 'GENERATING',
         waRecipient: viaWhatsApp ? settings.whatsappNumber : null,
       },
     });
 
     try {
-      const [products, recent, profile, page] = await Promise.all([
+      const [products, recent, profile, page, pastPosts, insights] = await Promise.all([
         this.prisma.offering
           .findMany({
             where: { orgId, isActive: true },
@@ -381,7 +491,13 @@ export class StoriesService {
         igChannel
           ? this.prisma.pageProfile.findFirst({ where: { channelId: igChannel.id, orgId } }).catch(() => null)
           : null,
+        this.recentCaptions(orgId),
+        this.ensureInsights(orgId, org.name).catch((e) => {
+          this.logger.warn(`Post insights for org ${orgId} failed: ${e.message}`);
+          return null;
+        }),
       ]);
+      const brandKit = brandKitOf(settings, page?.language || profile?.language || profile?.replyLanguage);
       // One description for the whole product: the daily-posts override, then
       // the page's own, then the business setup.
       const description = settings.businessDescription || page?.description || profile?.description || null;
@@ -413,6 +529,9 @@ export class StoriesService {
           recentTitles: recent.map((r) => r.title),
           forDate,
           trendKeywords,
+          brandKit,
+          insights,
+          pastPosts,
         },
         count,
       );
@@ -420,7 +539,21 @@ export class StoriesService {
       const productIds = new Set(products.map((p) => p.id));
       for (let i = 0; i < ideas.length; i++) {
         const { offeringId, ...idea } = ideas[i];
-        const image = await toStoryJpeg(await this.withRetry(() => this.gemini.generateImage(idea.imagePrompt)));
+        if (textFirst) {
+          await this.prisma.storyOption.create({
+            data: {
+              batchId: batch.id,
+              position: i + 1,
+              ...idea,
+              label: idea.label || `Trending: ${idea.seedKeyword}`.slice(0, 30),
+              offeringId: offeringId && productIds.has(offeringId) ? offeringId : null,
+            },
+          });
+          continue;
+        }
+        const image = await toStoryJpeg(
+          await this.withRetry(() => this.gemini.generateImage(idea.imagePrompt + brandImageStyle(brandKit))),
+        );
         await this.prisma.storyOption.create({
           data: {
             batchId: batch.id,
@@ -428,7 +561,7 @@ export class StoriesService {
             ...idea,
             label: idea.label || `Trending: ${idea.seedKeyword}`.slice(0, 30),
             offeringId: offeringId && productIds.has(offeringId) ? offeringId : null,
-            imageData: new Uint8Array(image),
+            ...(await this.storeMedia('image', image)),
           },
         });
       }
@@ -528,7 +661,7 @@ export class StoriesService {
   async remindUnpicked(now = new Date()): Promise<number> {
     const batches = await this.prisma.storyBatch.findMany({
       where: {
-        kind: 'DAILY',
+        kind: { in: ROUND_KINDS },
         status: { in: ['NOTIFIED', 'AWAITING_PICK'] },
         reminderSentAt: null,
         createdAt: { gt: new Date(now.getTime() - PICK_WINDOW_MS) },
@@ -559,8 +692,11 @@ export class StoriesService {
         sent = await this.metaPublisher.sendWhatsAppMessage(
           sender.phoneNumberId,
           b.waRecipient,
-          `Aaj ki post abhi chuni nahi gayi. ${postTime} baje tak kisi option ke neeche "Post this" dabaiye, ` +
-            'warna aaj kuch post nahi hoga.',
+          b.kind === 'ROUND'
+            ? 'Aaj ke ideas me se abhi kuch chuna nahi gaya. Pasand ke number bhejiye, jaise "1,3", ' +
+                `to ${postTime} tak posts taiyaar ho jayengi.`
+            : `Aaj ki post abhi chuni nahi gayi. ${postTime} baje tak kisi option ke neeche "Post this" dabaiye, ` +
+                'warna aaj kuch post nahi hoga.',
           sender.accessToken,
         );
       }
@@ -615,6 +751,9 @@ export class StoriesService {
     // (a lapsed edit is ours too, to say so instead of silently dropping it),
     // or says "2 post karo" while today's ideas are open.
     if (await this.editingBatch(from)) return true;
+    if (await this.openRound(from)) {
+      if (SKIP_ROUND_TEXT.test(text) || parseRoundPicks(text, MAX_OPTIONS).length) return true;
+    }
     if (pickIntent(text) !== null) {
       const open = await this.prisma.storyBatch.findFirst({
         where: {
@@ -697,6 +836,13 @@ export class StoriesService {
       const position = Number(rest.slice(sep + 1));
       if (prefix === EDIT_PREFIX) return this.startEdit(batchId, position, from);
       if (prefix === CAPTION_PREFIX) return this.startEdit(batchId, position, from, 'CAPTION');
+      if (prefix === CONTEXT_PREFIX) {
+        await this.pickContexts(batchId, [{ position, note: null }], { from });
+        return;
+      }
+      if (prefix === AS_POST_PREFIX || prefix === AS_STORY_PREFIX) {
+        return this.approveAs(batchId, position, from, prefix === AS_POST_PREFIX ? 'POST' : 'STORY');
+      }
       const when = prefix === NOW_PREFIX ? 'now' : prefix === TOMORROW_PREFIX ? 'tomorrow' : undefined;
       return this.pick(batchId, position, from, new Date(), when);
     }
@@ -736,6 +882,16 @@ export class StoriesService {
       });
       if (scheduled) return this.cancelFromWhatsApp(scheduled.id, from);
     }
+    // Today's text ideas are open: "1,3", "2 red lehenga ke saath", "sab", "skip".
+    const round = text ? await this.openRound(from) : null;
+    if (round) {
+      if (SKIP_ROUND_TEXT.test(text)) return this.skipRound(round.id, from);
+      const picks = parseRoundPicks(text, MAX_OPTIONS);
+      if (picks.length) {
+        await this.pickContexts(round.id, picks, { from });
+        return;
+      }
+    }
     const position = pickIntent(text);
     const batch =
       position === null
@@ -751,6 +907,312 @@ export class StoriesService {
     if (batch && position !== null) return this.pick(batch.id, position, from);
     const waiting = await this.awaitingContext(from);
     if (waiting && text) return this.receiveContext(waiting, text, from);
+  }
+
+  // ---------------------------------------------- text-first rounds
+
+  /** Today's text ideas this number can still pick from (36h). */
+  private openRound(from: string) {
+    return this.prisma.storyBatch.findFirst({
+      where: {
+        waRecipient: from,
+        kind: 'ROUND',
+        status: { in: ['NOTIFIED', 'AWAITING_PICK'] },
+        createdAt: { gt: new Date(Date.now() - PICK_WINDOW_MS) },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+  }
+
+  /** The round's ideas as text (cheap: nothing is drawn until the seller picks). */
+  private async showContexts(
+    batch: {
+      id: string;
+      orgId: string;
+      status: string;
+      options: Array<{ position: number; title: string; label?: string | null; idea: string }>;
+    },
+    to: string,
+  ) {
+    const sender = this.sender();
+    if (!sender) return;
+    const settings = await this.prisma.storySettings.findUnique({ where: { orgId: batch.orgId } });
+    const max = Math.min(settings?.maxPicks || 3, batch.options.length);
+    const lines = batch.options.map(
+      (o) => `*${o.position}. ${o.title}*${o.label ? ` (${o.label})` : ''}\n${o.idea}`,
+    );
+    await this.text(
+      to,
+      `Aaj ke ${batch.options.length} post ideas:\n\n${lines.join('\n\n')}\n\n` +
+        `Jo pasand ho unke number bhejiye (${max} tak), jaise *1,3*.\n` +
+        'Kisi idea me apni baat jodni ho to number ke baad likhiye, jaise *2 red lehenga ke saath*.\n' +
+        'Aaj kuch nahi chahiye to *skip* likhiye.',
+    );
+    await this.metaPublisher.sendWhatsAppList(
+      sender.phoneNumberId,
+      to,
+      'Ya sirf ek idea chunna ho to yahan se chuniye:',
+      'Ek idea chuno',
+      batch.options.map((o) => ({
+        id: `${CONTEXT_PREFIX}${batch.id}_${o.position}`,
+        title: o.title,
+        description: o.label || undefined,
+      })),
+      sender.accessToken,
+    );
+    if (batch.status === 'NOTIFIED') {
+      await this.prisma.storyBatch.update({ where: { id: batch.id }, data: { status: 'AWAITING_PICK' } });
+    }
+  }
+
+  private async skipRound(batchId: string, from: string) {
+    const done = await this.prisma.storyBatch.updateMany({
+      where: { id: batchId, status: { in: ['NOTIFIED', 'AWAITING_PICK'] } },
+      data: { status: 'SKIPPED' },
+    });
+    if (done.count) await this.text(from, 'Theek hai, aaj koi post nahi banegi. Agle round me naye ideas bhejenge.');
+  }
+
+  /**
+   * The seller picked ideas from a round (WhatsApp or dashboard). Each pick,
+   * with what they added ("red lehenga ke saath"), becomes its own post: a
+   * caption and an image in the brand's look, sent back with Post / Story /
+   * Edit. Capped at the settings' maxPicks. Claimed once, so a repeated
+   * webhook does not draw the posts twice.
+   */
+  async pickContexts(
+    batchId: string,
+    picks: Array<{ position: number; note: string | null }>,
+    who: { from?: string; orgId?: string },
+  ): Promise<string[]> {
+    const round = await this.prisma.storyBatch.findUnique({
+      where: { id: batchId },
+      include: { options: { orderBy: { position: 'asc' } } },
+    });
+    if (!round || round.kind !== 'ROUND') return [];
+    if (who.from ? round.waRecipient !== who.from : round.orgId !== who.orgId) return [];
+    const to = who.from || null;
+    const settings = await this.prisma.storySettings.findUnique({ where: { orgId: round.orgId } });
+    const max = Math.max(1, settings?.maxPicks || 3);
+    const wanted = uniqueBy(
+      picks.filter((p) => round.options.some((o) => o.position === p.position)),
+      (p) => p.position,
+    );
+    if (!wanted.length) {
+      if (to) await this.text(to, `Yeh number ideas me nahi hai. 1 se ${round.options.length} ke beech bhejiye.`);
+      return [];
+    }
+    const chosen = wanted.slice(0, max);
+    const claimed = await this.prisma.storyBatch.updateMany({
+      where: { id: round.id, status: { in: ['NOTIFIED', 'AWAITING_PICK'] } },
+      data: { status: 'PICKED' },
+    });
+    if (claimed.count === 0) {
+      if (to) await this.text(to, statusMessage(round.status));
+      return [];
+    }
+    if (to) {
+      await this.text(
+        to,
+        `Theek hai, idea ${chosen.map((p) => p.position).join(', ')} ki post bana rahe hain. Ek-do minute lagenge...` +
+          (wanted.length > chosen.length ? `\n(Ek round me ${max} tak posts bante hain, isliye pehle ${max} liye.)` : ''),
+      );
+    }
+    const made: string[] = [];
+    for (const p of chosen) {
+      const option = round.options.find((o) => o.position === p.position)!;
+      try {
+        made.push(await this.makePostFromIdea(round, option, p.note, to));
+      } catch (e: any) {
+        this.logger.error(`Post from idea ${option.id} failed: ${e.message}`);
+        if (to) await this.text(to, `Idea ${p.position} ki post nahi ban payi. Dashboard se dobara try kar sakte hain.`);
+      }
+    }
+    return made;
+  }
+
+  /** One picked idea as a finished post (IDEA batch) waiting for approval. */
+  private async makePostFromIdea(
+    round: { id: string; orgId: string; forDate: string; waRecipient: string | null; trendKeywords: string[] },
+    option: {
+      title: string;
+      label: string;
+      idea: string;
+      caption: string | null;
+      imagePrompt: string;
+      seedKeyword: string;
+      offeringId: string | null;
+    },
+    note: string | null,
+    to: string | null,
+  ): Promise<string> {
+    const [settings, org, profile] = await Promise.all([
+      this.prisma.storySettings.findUnique({ where: { orgId: round.orgId } }),
+      this.prisma.organization.findUnique({ where: { id: round.orgId }, select: { name: true } }),
+      this.prisma.businessProfile.findUnique({ where: { orgId: round.orgId } }).catch(() => null),
+    ]);
+    const brandKit = brandKitOf(settings, profile?.language || profile?.replyLanguage);
+    let draft = { title: option.title, caption: option.caption || '', imagePrompt: option.imagePrompt };
+    if (note) {
+      try {
+        draft = await this.gemini.refinePost(
+          { ...option, caption: option.caption || '' },
+          { brandName: profile?.businessName || org?.name || '', brandKit, note },
+        );
+      } catch (e: any) {
+        this.logger.warn(`Refining idea with the seller's note failed: ${e.message}`);
+        draft.imagePrompt = `${draft.imagePrompt}\nOwner's request: ${note}`;
+      }
+    }
+    const image = await toStoryJpeg(
+      await this.withRetry(() => this.gemini.generateImage(draft.imagePrompt + brandImageStyle(brandKit))),
+    );
+    const post = await this.prisma.storyBatch.create({
+      data: {
+        orgId: round.orgId,
+        forDate: round.forDate,
+        kind: 'IDEA',
+        status: 'AWAITING_PICK',
+        parentBatchId: round.id,
+        sellerNote: note,
+        waRecipient: round.waRecipient,
+        trendKeywords: round.trendKeywords,
+      },
+    });
+    const created = await this.prisma.storyOption.create({
+      data: {
+        batchId: post.id,
+        position: 1,
+        title: draft.title,
+        label: option.label,
+        idea: option.idea,
+        caption: draft.caption || null,
+        imagePrompt: draft.imagePrompt,
+        seedKeyword: option.seedKeyword,
+        offeringId: option.offeringId,
+        ...(await this.storeMedia('image', image)),
+      },
+    });
+    if (to) await this.sendOption(post.id, created, to, 'IDEA');
+    return post.id;
+  }
+
+  /** "Post" / "Story" on a post made from an idea: sets where it goes, then schedules it. */
+  async approveAs(batchId: string, position: number, from: string, as: 'POST' | 'STORY') {
+    const batch = await this.prisma.storyBatch.findUnique({
+      where: { id: batchId },
+      select: { orgId: true, waRecipient: true, status: true },
+    });
+    if (!batch || batch.waRecipient !== from) return;
+    if (!PICKABLE.includes(batch.status)) {
+      await this.text(from, statusMessage(batch.status));
+      return;
+    }
+    const settings = await this.prisma.storySettings.findUnique({ where: { orgId: batch.orgId } });
+    await this.prisma.storyBatch.update({
+      where: { id: batchId },
+      data: { destinations: destinationsFor(as, settings) },
+    });
+    return this.pick(batchId, position, from);
+  }
+
+  /** Dashboard: pick ideas from a round; the posts are drawn in the background. */
+  async pickContextsFromDashboard(orgId: string, batchId: string, picks: Array<{ position: number; note?: string | null }>) {
+    const round = await this.prisma.storyBatch.findFirst({
+      where: { id: batchId, orgId, kind: 'ROUND' },
+      select: { id: true, status: true },
+    });
+    if (!round) throw new NotFoundException('Ideas not found');
+    if (!['NOTIFIED', 'AWAITING_PICK'].includes(round.status)) throw new BadRequestException(statusMessage(round.status));
+    const clean = (Array.isArray(picks) ? picks : [])
+      .map((p) => ({ position: Number(p?.position), note: String(p?.note || '').trim().slice(0, 500) || null }))
+      .filter((p) => Number.isInteger(p.position) && p.position >= 1);
+    if (!clean.length) throw new BadRequestException('Pick at least one idea');
+    if (!this.gemini.isConfigured()) throw new BadRequestException('GEMINI_API_KEY is not set');
+    setImmediate(() => {
+      this.pickContexts(round.id, clean, { orgId }).catch((e) =>
+        this.logger.error(`Dashboard pick for round ${round.id} failed: ${e.message}`),
+      );
+    });
+    return { accepted: true, picks: clean.length };
+  }
+
+  // ------------------------------------------------ what worked before
+
+  /** Captions of the page's latest posts, newest first, so new ideas do not repeat them. */
+  private async recentCaptions(orgId: string): Promise<string[]> {
+    const posts = await this.prisma.socialPost
+      .findMany({
+        where: { orgId, caption: { not: null } },
+        orderBy: [{ postedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
+        take: 12,
+        select: { caption: true },
+      })
+      .catch(() => []);
+    return (posts || []).map((p) => String(p.caption || '').trim()).filter(Boolean);
+  }
+
+  /**
+   * The page's own posts, summarised about once a week: what topics and
+   * formats got likes and comments, and what fell flat. Kept when there are
+   * too few posts to learn from.
+   */
+  async ensureInsights(orgId: string, brandName: string, now = new Date()) {
+    const saved = await this.prisma.contentInsight.findUnique({ where: { orgId } });
+    if (saved && now.getTime() - saved.analyzedAt.getTime() < INSIGHTS_TTL_MS) return saved;
+    if (!this.gemini.isConfigured()) return saved;
+    const posts = await this.prisma.socialPost.findMany({
+      where: { orgId, caption: { not: null } },
+      orderBy: [{ postedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
+      take: 40,
+      select: { caption: true, likes: true, commentsCount: true, postedAt: true },
+    });
+    if (posts.length < MIN_POSTS_FOR_INSIGHTS) return saved;
+    const insights = await this.gemini.analyzePosts(
+      brandName,
+      posts.map((p) => ({
+        caption: String(p.caption),
+        likes: p.likes,
+        comments: p.commentsCount,
+        postedAt: p.postedAt?.toISOString() || null,
+      })),
+    );
+    if (!insights.summary) return saved;
+    const data = { ...insights, postsAnalyzed: posts.length, analyzedAt: now };
+    return this.prisma.contentInsight.upsert({ where: { orgId }, create: { orgId, ...data }, update: data });
+  }
+
+  /** A first brand kit from the page's own posts (captions and a few images), for the seller to confirm. */
+  async suggestBrandKit(orgId: string) {
+    if (!this.gemini.isConfigured()) throw new BadRequestException('GEMINI_API_KEY is not set');
+    const [org, posts] = await Promise.all([
+      this.prisma.organization.findUnique({ where: { id: orgId }, select: { name: true } }),
+      this.prisma.socialPost.findMany({
+        where: { orgId },
+        orderBy: [{ postedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
+        take: 20,
+        select: { caption: true, mediaUrl: true },
+      }),
+    ]);
+    const images: Array<{ data: Buffer; mimeType: string }> = [];
+    for (const p of posts) {
+      if (images.length >= 4 || !p.mediaUrl) continue;
+      try {
+        const res = await fetch(p.mediaUrl, { signal: AbortSignal.timeout(10_000) });
+        const type = res.headers.get('content-type') || '';
+        if (res.ok && /^image\/(jpeg|png|webp)/.test(type)) {
+          images.push({ data: Buffer.from(await res.arrayBuffer()), mimeType: type.split(';')[0] });
+        }
+      } catch {
+        // Instagram CDN links expire; captions alone still work.
+      }
+    }
+    const captions = posts.map((p) => String(p.caption || '').trim()).filter(Boolean);
+    if (!captions.length && !images.length) {
+      throw new BadRequestException('No posts found yet. Sync your posts in Post tags first, or fill the brand kit in.');
+    }
+    return this.gemini.suggestBrandKit(org?.name || '', captions, images);
   }
 
   // ------------------------------------------------- daily post context
@@ -873,6 +1335,7 @@ export class StoriesService {
       await this.text(from, statusMessage(batch.status));
       return;
     }
+    if (batch.kind === 'ROUND') return this.showContexts(batch, from);
 
     for (const o of batch.options) {
       await this.sendOption(batch.id, o, from);
@@ -893,21 +1356,30 @@ export class StoriesService {
     }
   }
 
-  private async sendOption(batchId: string, o: OptionCard, to: string) {
+  private async sendOption(batchId: string, o: OptionCard, to: string, kind?: string | null) {
     const sender = this.sender();
     if (!sender) return;
-    const body =
-      `${o.position}. ${o.label ? `[${o.label}] ` : ''}*${o.title}*\n${o.idea}` +
-      (o.caption ? `\n\nCaption: ${o.caption}` : '');
+    // A post made from a picked idea: approve it as a post or as a story.
+    const idea = kind === 'IDEA';
+    const body = idea
+      ? `*${o.title}*${o.caption ? `\n${o.caption}` : ''}\n\nPost ke liye "Post", story ke liye "Story". Kuch badalna ho to "Edit".`
+      : `${o.position}. ${o.label ? `[${o.label}] ` : ''}*${o.title}*\n${o.idea}` +
+        (o.caption ? `\n\nCaption: ${o.caption}` : '');
     const sent = await this.metaPublisher.sendWhatsAppImageButtons(
       sender.phoneNumberId,
       to,
       this.mediaUrl(o.id, 'draft', o.revision),
-      body,
-      [
-        { id: `${POST_PREFIX}${batchId}_${o.position}`, title: 'Post this' },
-        { id: `${EDIT_PREFIX}${batchId}_${o.position}`, title: 'Edit' },
-      ],
+      body.slice(0, 1024),
+      idea
+        ? [
+            { id: `${AS_POST_PREFIX}${batchId}_${o.position}`, title: 'Post' },
+            { id: `${AS_STORY_PREFIX}${batchId}_${o.position}`, title: 'Story' },
+            { id: `${EDIT_PREFIX}${batchId}_${o.position}`, title: 'Edit' },
+          ]
+        : [
+            { id: `${POST_PREFIX}${batchId}_${o.position}`, title: 'Post this' },
+            { id: `${EDIT_PREFIX}${batchId}_${o.position}`, title: 'Edit' },
+          ],
       sender.accessToken,
     );
     // Buttons need the 24h window; if Meta refuses, the image and a number still work.
@@ -950,7 +1422,9 @@ export class StoriesService {
       return;
     }
 
-    const { postTime, timezone, destinations } = await this.postingInfo(batch.orgId);
+    const info = await this.postingInfo(batch.orgId);
+    const { postTime, timezone } = info;
+    const destinations = batch.destinations?.length ? destinationsOf(batch) : info.destinations;
     let at: When;
     if (when === 'now') {
       at = 'now';
@@ -1223,27 +1697,28 @@ export class StoriesService {
       });
       const batch = await this.prisma.storyBatch.findUnique({
         where: { id: batchId },
-        select: { status: true, selectedOptionId: true },
+        select: { status: true, selectedOptionId: true, kind: true },
       });
       if (batch?.status === 'SCHEDULED' && batch.selectedOptionId === optionId) {
         // Already scheduled: show the new preview; the schedule stays.
         await this.confirmScheduled(from, batchId, updated.position, optionId, 'Caption badal diya. Schedule wahi hai.');
       } else {
         await this.text(from, 'Caption badal diya.');
-        await this.sendOption(batchId, updated, from);
+        await this.sendOption(batchId, updated, from, batch?.kind);
       }
       return;
     }
 
     const option = await this.prisma.storyOption.findUnique({
       where: { id: optionId },
+      include: { batch: { select: { kind: true } } },
     });
-    if (!option?.imageData) return;
+    if (!hasImage(option)) return;
 
     await this.text(from, 'Badlav kar rahe hain, ek minute...');
     try {
-      const updated = await this.editOptionImage(option.id, Buffer.from(option.imageData), instruction);
-      await this.sendOption(batchId, updated, from);
+      const updated = await this.editOptionImage(option.id, await this.loadMedia(option, 'image'), instruction);
+      await this.sendOption(batchId, updated, from, option.batch?.kind);
     } catch (e: any) {
       this.logger.warn(`Edit failed for option ${option.id}: ${e.message}`);
       await this.text(from, 'Yeh badlav nahi ho paya. Thoda alag shabdon me dobara "Edit" dabakar likhiye.');
@@ -1257,8 +1732,9 @@ export class StoriesService {
     return this.prisma.storyOption.update({
       where: { id: optionId },
       data: {
-        imageData: new Uint8Array(edited),
+        ...(await this.storeMedia('image', edited)),
         finalImageData: null,
+        finalImageKey: null,
         revision: { increment: 1 },
       },
     });
@@ -1366,7 +1842,7 @@ export class StoriesService {
         seedKeyword: details.seedKeyword,
         source: 'OWN',
         offeringId: details.offeringId,
-        imageData: new Uint8Array(draft),
+        ...(await this.storeMedia('image', draft)),
       },
     });
     if (opts.at) await this.choose(batch.id, option.id, opts.at, now);
@@ -1393,7 +1869,10 @@ export class StoriesService {
     const batch = await this.prisma.storyBatch.findFirst({
       where: { id: batchId, orgId },
       include: {
-        options: { where: position ? { position } : undefined, select: { id: true, imageData: true } },
+        options: {
+          where: position ? { position } : undefined,
+          select: { id: true, imageData: true, imageKey: true },
+        },
       },
     });
     if (!batch) throw new NotFoundException('Post not found');
@@ -1409,13 +1888,20 @@ export class StoriesService {
     orgId: string,
     batchId: string,
     position: number,
-    input: { when?: 'now' | 'tomorrow' | 'scheduled'; at?: string | null },
+    input: { when?: 'now' | 'tomorrow' | 'scheduled'; at?: string | null; as?: 'POST' | 'STORY' | 'BOTH' | null },
     now = new Date(),
   ) {
     const batch = await this.batchForOrg(orgId, batchId, position);
     if (!PICKABLE.includes(batch.status)) throw new BadRequestException(statusMessage(batch.status));
     const option = batch.options[0];
     if (!option) throw new NotFoundException(`Option ${position} not found`);
+    if (input.as) {
+      const settings = await this.prisma.storySettings.findUnique({ where: { orgId } });
+      await this.prisma.storyBatch.update({
+        where: { id: batch.id },
+        data: { destinations: destinationsFor(input.as, settings) },
+      });
+    }
     const { postTime, timezone } = await this.postingInfo(orgId);
 
     let at: When;
@@ -1476,9 +1962,9 @@ export class StoriesService {
     const batch = await this.batchForOrg(orgId, batchId, position);
     if (!PICKABLE.includes(batch.status)) throw new BadRequestException(statusMessage(batch.status));
     const option = batch.options[0];
-    if (!option?.imageData) throw new NotFoundException(`Option ${position} not found`);
+    if (!hasImage(option)) throw new NotFoundException(`Option ${position} not found`);
     if (!this.gemini.isConfigured()) throw new BadRequestException('Image editing is not set up');
-    const updated = await this.editOptionImage(option.id, Buffer.from(option.imageData), text.slice(0, 500));
+    const updated = await this.editOptionImage(option.id, await this.loadMedia(option, 'image'), text.slice(0, 500));
     return { id: updated.id, revision: updated.revision, imageUrl: this.mediaUrl(updated.id, 'draft', updated.revision) };
   }
 
@@ -1539,7 +2025,7 @@ export class StoriesService {
     const to = batch.waRecipient || '';
 
     try {
-      const result = await this.publishOption(batch.orgId, batch.selectedOptionId);
+      const result = await this.publishOption(batch.orgId, batch.selectedOptionId, batch.destinations);
       const entries = Object.entries(result.targets) as Array<[Destination, TargetResult]>;
       const ok = entries.filter(([, r]) => r.ok);
       const failed = entries.filter(([, r]) => !r.ok);
@@ -1600,20 +2086,21 @@ export class StoriesService {
    * Every post that went out is remembered with its caption and catalog item,
    * so the first comments on it already get the right answer.
    */
-  async publishOption(orgId: string, optionId: string) {
+  async publishOption(orgId: string, optionId: string, only?: string[] | null) {
     const option = await this.prisma.storyOption.findUnique({
       where: { id: optionId },
       include: { batch: { select: { orgId: true, trendKeywords: true } } },
     });
-    if (!option?.imageData) throw new Error('Post image is missing');
+    if (!hasImage(option)) throw new Error('Post image is missing');
     const settings = await this.prisma.storySettings.findUnique({
       where: { orgId },
     });
-    const destinations = destinationsOf(settings);
+    // "Post" or "Story" chosen for this one post wins over the settings.
+    const destinations = only?.length ? destinationsOf({ destinations: only }) : destinationsOf(settings);
 
     // The hashtags shown in the WhatsApp preview, when the merchant saw one.
     const { keywords, hashtags } = await this.ensureHashtags(option);
-    const draft = Buffer.from(option.imageData);
+    const draft = await this.loadMedia(option, 'image');
 
     let finalImage: Buffer | null = null;
     if (destinations.includes('IG_STORY') || destinations.includes('IG_REEL')) {
@@ -1646,8 +2133,8 @@ export class StoriesService {
       data: {
         keywords,
         hashtags,
-        ...(finalImage ? { finalImageData: new Uint8Array(finalImage) } : {}),
-        ...(reel ? { reelVideoData: new Uint8Array(reel) } : {}),
+        ...(finalImage ? await this.storeMedia('final', finalImage) : {}),
+        ...(reel ? await this.storeMedia('reel', reel) : {}),
       },
     });
 
@@ -1785,26 +2272,43 @@ export class StoriesService {
     if (!timingSafeEqualString(signature.replace(/\.(jpg|mp4)$/, ''), this.sign(optionId, variant))) {
       throw new NotFoundException();
     }
-    if (variant === 'reel') {
-      const reel = await this.prisma.storyOption.findUnique({
-        where: { id: optionId },
-        select: { reelVideoData: true },
-      });
-      if (!reel?.reelVideoData) throw new NotFoundException();
-      return Buffer.from(reel.reelVideoData);
-    }
     const option = await this.prisma.storyOption.findUnique({
       where: { id: optionId },
-      select: { imageData: true, finalImageData: true },
+      select: variant === 'reel'
+        ? { reelVideoData: true, reelVideoKey: true }
+        : { imageData: true, imageKey: true, finalImageData: true, finalImageKey: true },
     });
-    if (variant === 'feed') {
-      // Feed crops the clean draft: the story lettering sits where a 4:5 crop cuts.
-      if (!option?.imageData) throw new NotFoundException();
-      return toFeedJpeg(Buffer.from(option.imageData));
+    const kind: MediaKind = variant === 'reel' ? 'reel' : variant === 'final' ? 'final' : 'image';
+    if (!option || !hasMedia(option, kind)) throw new NotFoundException();
+    const data = await this.loadMedia(option, kind);
+    // Feed crops the clean draft: the story lettering sits where a 4:5 crop cuts.
+    return variant === 'feed' ? toFeedJpeg(data) : data;
+  }
+
+  /**
+   * Where new image or video bytes go: object storage when it is set up (the
+   * key is stored), otherwise the database column, as before. Returns the
+   * option fields to write.
+   */
+  private async storeMedia(kind: MediaKind, data: Buffer): Promise<Record<string, unknown>> {
+    const { bytes, key } = MEDIA_COLUMNS[kind];
+    if (this.media?.isConfigured()) {
+      const objectKey = `posts/${new Date().toISOString().slice(0, 7)}/${crypto.randomUUID()}.${kind === 'reel' ? 'mp4' : 'jpg'}`;
+      try {
+        await this.media.put(objectKey, data, kind === 'reel' ? 'video/mp4' : 'image/jpeg');
+        return { [key]: objectKey, [bytes]: null };
+      } catch (e: any) {
+        this.logger.error(`Object storage upload failed, keeping ${kind} in the database: ${e.message}`);
+      }
     }
-    const data = variant === 'final' ? option?.finalImageData : option?.imageData;
-    if (!data) throw new NotFoundException();
-    return Buffer.from(data);
+    return { [bytes]: new Uint8Array(data), [key]: null };
+  }
+
+  private async loadMedia(option: Record<string, any>, kind: MediaKind): Promise<Buffer> {
+    const { bytes, key } = MEDIA_COLUMNS[kind];
+    if (option[key]) return this.media.get(option[key]);
+    if (option[bytes]) return Buffer.from(option[bytes]);
+    throw new NotFoundException();
   }
 
   private sign(optionId: string, variant: string): string {
@@ -1871,6 +2375,22 @@ const OPTION_FIELDS = {
   offeringId: true,
 } as const;
 
+type MediaKind = 'image' | 'final' | 'reel';
+const MEDIA_COLUMNS: Record<MediaKind, { bytes: string; key: string }> = {
+  image: { bytes: 'imageData', key: 'imageKey' },
+  final: { bytes: 'finalImageData', key: 'finalImageKey' },
+  reel: { bytes: 'reelVideoData', key: 'reelVideoKey' },
+};
+
+function hasMedia(option: Record<string, any> | null | undefined, kind: MediaKind): boolean {
+  const { bytes, key } = MEDIA_COLUMNS[kind];
+  return Boolean(option?.[key] || option?.[bytes]);
+}
+
+function hasImage<T extends Record<string, any>>(option: T | null | undefined): option is T {
+  return hasMedia(option, 'image');
+}
+
 // Everything that marks a batch as "in edit mode".
 const NO_EDIT = { editingOptionId: null, editingMode: null, editingStartedAt: null };
 
@@ -1917,6 +2437,8 @@ function statusMessage(status: string): string {
   if (status === 'PUBLISHING') return 'Aapki chuni hui post abhi publish ho rahi hai.';
   if (status === 'PUBLISHED') return 'Aaj ki post already lag chuki hai. Kal naye ideas aayenge.';
   if (status === 'GENERATING') return 'Aaj ke ideas abhi ban rahe hain, thodi der me bhejte hain.';
+  if (status === 'PICKED') return 'Is round ke ideas chune ja chuke hain. Unki posts upar bheji hain.';
+  if (status === 'SKIPPED') return 'Is round ko skip kiya tha. Agle round me naye ideas aayenge.';
   if (status === 'AWAITING_PICK' || status === 'NOTIFIED') return 'Yeh post schedule nahi thi.';
   return 'Ye ideas ab available nahi hain. Kal naye ideas aayenge.';
 }
@@ -1925,6 +2447,7 @@ function regenerateBlockedMessage(status: string): string {
   if (status === 'GENERATING') return "Today's ideas are still being made. They reach WhatsApp in a few minutes.";
   if (status === 'PUBLISHED') return "Today's post is already live. New ideas come tomorrow.";
   if (status === 'PUBLISHING') return "Today's post is being published right now.";
+  if (status === 'PICKED') return "Today's ideas are already picked; their posts are listed below.";
   return "Today's picked post is scheduled. Cancel it first if you want new ideas.";
 }
 
@@ -1946,6 +2469,101 @@ function destinationsOf(settings?: { destinations?: string[] | null } | null): D
     (DESTINATIONS as readonly string[]).includes(d),
   );
   return list.length ? list : ['IG_STORY'];
+}
+
+/** "Post": the settings' feed destinations (Instagram post if none); "Story": the story; "Both": both. */
+function destinationsFor(as: string, settings?: { destinations?: string[] | null } | null): Destination[] {
+  const feed = destinationsOf(settings).filter((d) => d !== 'IG_STORY');
+  const post: Destination[] = feed.length ? feed : ['IG_FEED'];
+  if (as === 'STORY') return ['IG_STORY'];
+  if (as === 'BOTH') return ['IG_STORY', ...post];
+  return post;
+}
+
+/** Kinds of batch that make up "today's round": one per org per day. */
+const ROUND_KINDS = ['DAILY', 'ROUND'];
+
+/** Whole days from date `a` to date `b` (both YYYY-MM-DD). */
+export function daysBetween(a: string, b: string): number {
+  return Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000);
+}
+
+function cleanList(values: unknown, max: number, maxLength: number): string[] {
+  return [
+    ...new Set(
+      (Array.isArray(values) ? values : []).map((v) => String(v).trim().slice(0, maxLength)).filter(Boolean),
+    ),
+  ].slice(0, max);
+}
+
+function uniqueBy<T>(values: T[], key: (v: T) => unknown): T[] {
+  const seen = new Set<unknown>();
+  return values.filter((v) => (seen.has(key(v)) ? false : (seen.add(key(v)), true)));
+}
+
+/** The brand kit from the settings; the page or business language when none is set. */
+function brandKitOf(
+  settings: {
+    brandColors?: string[] | null;
+    brandThemes?: string[] | null;
+    visualStyle?: string | null;
+    brandDirection?: string | null;
+    contentLanguage?: string | null;
+    avoidTopics?: string[] | null;
+  } | null,
+  fallbackLanguage?: string | null,
+): BrandKit | null {
+  const kit: BrandKit = {
+    colors: settings?.brandColors || [],
+    themes: settings?.brandThemes || [],
+    visualStyle: settings?.visualStyle || null,
+    direction: settings?.brandDirection || null,
+    language: settings?.contentLanguage || fallbackLanguage || null,
+    avoid: settings?.avoidTopics || [],
+  };
+  const empty =
+    !kit.colors?.length && !kit.themes?.length && !kit.visualStyle && !kit.direction && !kit.language && !kit.avoid?.length;
+  return empty ? null : kit;
+}
+
+const ALL_TEXT = /^(sab|sabhi|saare|sare|all|sab ke sab|sab chahiye|all of them)[.!\s]*$/i;
+
+/**
+ * Which ideas a WhatsApp reply picks, and what the seller added to each:
+ * "1,3" → 1 and 3; "2 red lehenga ke saath, 4" → 2 with that note, and 4;
+ * "sab" → all. Only numbers 1..count count; anything else is no pick.
+ */
+export function parseRoundPicks(text: string, count: number): Array<{ position: number; note: string | null }> {
+  const t = String(text || '').trim();
+  if (!t) return [];
+  if (ALL_TEXT.test(t)) return Array.from({ length: count }, (_, i) => ({ position: i + 1, note: null }));
+  // A number at the start or after a separator ("1,3", "1 aur 3", "1 & 3", "idea 2").
+  const re = /(?:^|[\s,;&/+.]|aur|and)\s*(?:idea|option|no\.?|number|#)?\s*([1-9])(?![0-9])/gi;
+  const hits: Array<{ position: number; start: number; end: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(t))) {
+    const position = Number(m[1]);
+    if (position < 1 || position > count) continue;
+    // After a note, only a real separator starts the next pick: "2 me 5 log dikhao" is one pick.
+    const last = hits[hits.length - 1];
+    if (last && t.slice(last.end, m.index).trim() && !/[,;&/+]|aur|and/i.test(m[0])) continue;
+    hits.push({ position, start: m.index, end: m.index + m[0].length });
+  }
+  if (!hits.length) return [];
+  // Text before the first number is not a pick ("mujhe 2 chahiye" is fine; "kal 5 baje" is not).
+  const lead = t.slice(0, hits[0].start).trim().toLowerCase();
+  if (lead && !/^(mujhe|hame|hamein|humein|mere liye|please|pls|ok|okay|theek hai|haan|ha|yes|idea|option)[\s,:-]*$/.test(lead)) {
+    return [];
+  }
+  return hits.map((h, i) => {
+    const raw = t.slice(h.end, hits[i + 1]?.start ?? t.length);
+    const note = raw
+      .replace(/^[\s,;:.\-&/+]+|[\s,;:.\-&/+]+$/g, '')
+      .replace(/^(aur|and|wala|wali|waala|waali|chahiye|please|pls|post karo|bana do|banao)$/i, '')
+      .replace(/^(wala|wali|waala|waali|me|mein|main)\s+/i, '')
+      .trim();
+    return { position: h.position, note: note.length >= 3 ? note.slice(0, 500) : null };
+  });
 }
 
 function destinationsText(list: Destination[]): string {

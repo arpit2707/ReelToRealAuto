@@ -1,5 +1,50 @@
 # Daily Instagram story ideas
 
+## Text-first rounds (default, `flow = CONTEXTS`)
+
+1. Every `cadenceDays` days (1, 2, 3 or 7) at the send time, the API reads the
+   page's own posts (summarised weekly into `ContentInsight`: what got likes and
+   comments), today's trends (Apify hashtags cached per tag per day in
+   `TrendCache`, shared by every seller in the niche) and the seller's brand kit
+   (colours, themes, image look, caption language, direction, words to avoid),
+   and writes 4 or 5 ideas as **text only** (a `ROUND` batch). No image is drawn yet.
+2. The seller taps **Show ideas** and gets the ideas as a text message plus a
+   one-tap list. They reply with the numbers they want, up to `maxPicks`
+   (`1,3`, `sab`), and can add a twist after a number (`2 red lehenga ke saath`).
+   `skip` closes the round.
+3. Each pick becomes its own `IDEA` batch: Gemini folds the note into the
+   caption and image prompt, the image is drawn in the brand colours, stored in
+   object storage, and sent back with **Post**, **Story** and **Edit**.
+4. **Post** publishes to the feed destinations in the settings (Instagram post
+   when none), **Story** to the Instagram story, at the posting time. Everything
+   after that (edit, cancel, now or tomorrow, publish, the context question) is
+   the same as below. The dashboard offers the same picks and buttons.
+
+`flow = IMAGES` keeps the older flow below, where every idea is drawn up front
+and one is picked.
+
+### Object storage
+
+With `S3_BUCKET`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` set (plus
+`S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com` and `S3_REGION=auto`
+for Cloudflare R2), new images and Reel videos go to the bucket under
+`posts/YYYY-MM/<uuid>` and the `*Key` columns; the `Bytes` columns stay empty.
+The signed `/api/stories/media` URLs read from the bucket, so WhatsApp and
+Instagram links do not change. Without them, bytes stay in Postgres. A bucket
+lifecycle rule (e.g. delete after 60 days) keeps storage small.
+
+### WhatsApp sender
+
+`STORY_WA_PHONE_NUMBER_ID` alone is enough when that number is connected as a
+WhatsApp channel in the dashboard: its token is read from the channel (at boot
+and on every cron tick), so no token has to be copied into Render.
+
+### Scheduler
+
+A Cloudflare Worker cron (`reel2real-cron`, every 15 minutes) calls the daily
+endpoint with the same `STORY_CRON_SECRET`; the GitHub Action below stays as a
+backup, since GitHub delays and drops scheduled runs.
+
 Every morning each merchant who turned the feature on gets four story ideas on
 WhatsApp, picks one, and it is published to their Instagram stories with the
 best keywords and hashtags lettered on it.

@@ -75,6 +75,7 @@ model Organization {
   conversations     Conversation[]
   webhookEvents     WebhookEvent[]
   storySettings     StorySettings?
+  contentInsight    ContentInsight?
   storyBatches      StoryBatch[]
   businessProfile   BusinessProfile?
   offerings         Offering[]
@@ -507,6 +508,20 @@ model StorySettings {
   facebookChannelId   String?
   // Seller's own seed terms for trend research, on top of the business profile.
   nicheKeywords       String[]     @default([])
+  // CONTEXTS: send the round's ideas as text, draw only the ones the seller
+  // picks. IMAGES: the older flow that draws every idea up front.
+  flow                String       @default("CONTEXTS")
+  // A new round every N days (1 = daily, 3 = every third day).
+  cadenceDays         Int          @default(1)
+  // How many ideas one round may turn into posts.
+  maxPicks            Int          @default(3)
+  // Brand kit: every idea, caption and image follows these.
+  brandColors         String[]     @default([])
+  brandThemes         String[]     @default([])
+  visualStyle         String?
+  brandDirection      String?
+  contentLanguage     String?
+  avoidTopics         String[]     @default([])
   createdAt           DateTime     @default(now())
   updatedAt           DateTime     @updatedAt
 }
@@ -515,11 +530,18 @@ model StoryBatch {
   id               String        @id @default(uuid())
   orgId            String
   org              Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  // Calendar day in the org's timezone (YYYY-MM-DD). One DAILY batch per org
-  // per day; OWN batches (the seller's own photos) can be any number.
+  // Calendar day in the org's timezone (YYYY-MM-DD). One DAILY or ROUND batch
+  // per org per day; OWN and IDEA batches can be any number.
   forDate          String
-  // DAILY | OWN
+  // DAILY (ideas drawn up front) | ROUND (text ideas the seller picks from) |
+  // IDEA (one post made from a ROUND pick) | OWN (the seller's own photo)
   kind             String        @default("DAILY")
+  // IDEA batches: the ROUND they were picked from.
+  parentBatchId    String?
+  // What the seller added to the idea when picking it ("red lehenga ke saath").
+  sellerNote       String?
+  // Where this post goes when it differs from the settings (Post vs Story).
+  destinations     String[]      @default([])
   status           String        @default("GENERATING")
   // Set once the "you have not picked yet" nudge went out.
   reminderSentAt   DateTime?
@@ -547,6 +569,7 @@ model StoryBatch {
   updatedAt        DateTime      @updatedAt
 
   @@index([orgId, forDate])
+  @@index([parentBatchId])
   @@index([status, createdAt])
   @@index([status, scheduledFor])
 }
@@ -570,6 +593,11 @@ model StoryOption {
   finalImageData Bytes?
   // 7-second MP4 made from the image for IG_REEL, built at publish time.
   reelVideoData  Bytes?
+  // Object storage (S3 / Cloudflare R2) keys; when set, the bytes live there
+  // and the Bytes columns above stay empty.
+  imageKey       String?
+  finalImageKey  String?
+  reelVideoKey   String?
   // AI | OWN (a photo the seller sent or uploaded; never re-lettered)
   source         String     @default("AI")
   // Catalog item the post promotes, so comments on it get that item's price.
@@ -577,6 +605,30 @@ model StoryOption {
   createdAt      DateTime   @default(now())
 
   @@unique([batchId, position])
+}
+
+// What worked on the page before: the org's own posts summarised about once
+// a week, so new ideas build on winners and do not repeat old posts.
+model ContentInsight {
+  id            String       @id @default(uuid())
+  orgId         String       @unique
+  org           Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  summary       String
+  topTopics     String[]     @default([])
+  weakTopics    String[]     @default([])
+  postsAnalyzed Int          @default(0)
+  analyzedAt    DateTime     @default(now())
+}
+
+// Research shared by every seller in the same niche on the same day (e.g. the
+// Instagram hashtags for "bridal makeup"), so it is fetched once, not per seller.
+model TrendCache {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  values    String[] @default([])
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
 }
 
 // Per-page overrides of the business profile, for sellers who run more than
