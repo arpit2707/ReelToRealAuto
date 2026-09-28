@@ -9,6 +9,7 @@ import { GeminiClient } from './gemini.client';
 import { KeywordResearchService } from './keyword-research.service';
 import { overlayText, toFeedJpeg, toPaddedStoryJpeg, toStoryJpeg } from './story-image';
 import { toReelMp4 } from './story-video';
+import { MIN_POST_CONTEXT } from '../catalog/post-ai-gate.service';
 
 export const OPTION_COUNT = 5;
 const MIN_OPTIONS = 4;
@@ -26,6 +27,10 @@ const CANCEL_PREFIX = 'STORY_CANCEL_';
 const CAPTION_PREFIX = 'STORY_CAP_';
 // "Edit cancel" while the merchant is describing a change.
 const EDIT_CANCEL_PREFIX = 'STORY_EDITX_';
+// "Skip" on the "tell us about this post" question after a daily post goes live.
+const CONTEXT_SKIP_PREFIX = 'STORY_CTXSKIP_';
+// How long a free-text WhatsApp message is read as that post's context.
+export const CONTEXT_WAIT_MS = 48 * 60 * 60 * 1000;
 const OPTION_PREFIXES = [POST_PREFIX, PICK_PREFIX, EDIT_PREFIX, CAPTION_PREFIX, NOW_PREFIX, TOMORROW_PREFIX];
 // Statuses from which the merchant may still pick (or re-pick); FAILED lets them retry.
 const PICKABLE = ['NOTIFIED', 'AWAITING_PICK', 'SCHEDULED', 'FAILED'];
@@ -577,7 +582,12 @@ export class StoriesService {
   /** True for inbound messages this service owns; checked before the generic inbox/AI path. */
   async isStoryReply(msg: any, phoneNumberId: string): Promise<boolean> {
     const id = replyId(msg);
-    if (id && [SHOW_PREFIX, CANCEL_PREFIX, EDIT_CANCEL_PREFIX, ...OPTION_PREFIXES].some((p) => id.startsWith(p))) {
+    if (
+      id &&
+      [SHOW_PREFIX, CANCEL_PREFIX, EDIT_CANCEL_PREFIX, CONTEXT_SKIP_PREFIX, ...OPTION_PREFIXES].some((p) =>
+        id.startsWith(p),
+      )
+    ) {
       return true;
     }
     const sender = this.sender();
@@ -614,9 +624,41 @@ export class StoriesService {
         },
         select: { id: true },
       });
-      return Boolean(open);
+      if (open) return true;
     }
-    return false;
+    // Anything else while we wait for a daily post's context is that context.
+    return Boolean(await this.awaitingContext(from));
+  }
+
+  /** The published daily post whose context this number was asked for (48h). */
+  private async awaitingContext(from: string) {
+    const batch = await this.prisma.storyBatch.findFirst({
+      where: {
+        waRecipient: from,
+        awaitingContextPostId: { not: null },
+        awaitingContextAt: { gt: new Date(Date.now() - CONTEXT_WAIT_MS) },
+      },
+      orderBy: { awaitingContextAt: 'desc' },
+      select: { id: true, orgId: true, awaitingContextPostId: true, publishedTargets: true },
+    });
+    if (!batch?.awaitingContextPostId) return null;
+    // Context already given in the dashboard: stop waiting.
+    const post = await this.prisma.socialPost.findUnique({
+      where: { orgId_postId: { orgId: batch.orgId, postId: batch.awaitingContextPostId } },
+      select: { note: true },
+    });
+    if ((post?.note?.trim().length || 0) >= MIN_POST_CONTEXT) {
+      await this.stopWaitingForContext(batch.id);
+      return null;
+    }
+    return batch;
+  }
+
+  private stopWaitingForContext(batchId: string) {
+    return this.prisma.storyBatch.update({
+      where: { id: batchId },
+      data: { awaitingContextPostId: null, awaitingContextAt: null },
+    });
   }
 
   /** The batch whose option this number is currently describing changes for. */
@@ -643,6 +685,9 @@ export class StoriesService {
     }
     if (id?.startsWith(EDIT_CANCEL_PREFIX)) {
       return this.cancelEdit(id.slice(EDIT_CANCEL_PREFIX.length), from);
+    }
+    if (id?.startsWith(CONTEXT_SKIP_PREFIX)) {
+      return this.skipContext(id.slice(CONTEXT_SKIP_PREFIX.length), from);
     }
     for (const prefix of OPTION_PREFIXES) {
       if (!id?.startsWith(prefix)) continue;
@@ -692,17 +737,116 @@ export class StoriesService {
       if (scheduled) return this.cancelFromWhatsApp(scheduled.id, from);
     }
     const position = pickIntent(text);
-    if (position === null) return;
-    const batch = await this.prisma.storyBatch.findFirst({
-      where: {
-        waRecipient: from,
-        status: { in: PICKABLE },
-        createdAt: { gt: new Date(Date.now() - PICK_WINDOW_MS) },
-      },
-      orderBy: { createdAt: 'desc' },
+    const batch =
+      position === null
+        ? null
+        : await this.prisma.storyBatch.findFirst({
+            where: {
+              waRecipient: from,
+              status: { in: PICKABLE },
+              createdAt: { gt: new Date(Date.now() - PICK_WINDOW_MS) },
+            },
+            orderBy: { createdAt: 'desc' },
+          });
+    if (batch && position !== null) return this.pick(batch.id, position, from);
+    const waiting = await this.awaitingContext(from);
+    if (waiting && text) return this.receiveContext(waiting, text, from);
+  }
+
+  // ------------------------------------------------- daily post context
+
+  /**
+   * After a daily post goes live, the seller is asked what it is about. The
+   * AI answers its comments and DMs only once that context is in (min 20
+   * characters); Skip leaves it off, and the dashboard keeps asking.
+   */
+  private async askForContext(
+    batchId: string,
+    to: string,
+    published: Array<{ postId: string; platform: string }>,
+  ) {
+    const posts = published.filter((p) => p.postId);
+    if (!posts.length || !to) return;
+    const now = new Date();
+    await this.prisma.storyBatch.update({
+      where: { id: batchId },
+      data: { awaitingContextPostId: posts[0].postId, awaitingContextAt: now },
     });
-    if (!batch) return;
-    return this.pick(batch.id, position, from);
+    await this.prisma.socialPost.updateMany({
+      where: { postId: { in: posts.map((p) => p.postId) } },
+      data: { contextRequestedAt: now },
+    });
+    const body =
+      'Is post par AI comments aur DMs ka jawab tabhi dega jab aap iske baare me batayenge: ' +
+      `kya offer hai, kiske liye hai, koi khaas baat (kam se kam ${MIN_POST_CONTEXT} akshar). Bas yahin reply kar dijiye.`;
+    const sender = this.sender();
+    if (!sender) return;
+    const sent = await this.metaPublisher.sendInteractiveButtonMessage(
+      sender.phoneNumberId,
+      to,
+      'Post ka context',
+      body,
+      'Baad me dashboard se bhi daal sakte hain',
+      [{ id: `${CONTEXT_SKIP_PREFIX}${batchId}`, title: 'Skip' }],
+      sender.accessToken,
+    );
+    if (!sent) await this.text(to, `${body}\n\nAbhi nahi dena to "skip" likhiye.`);
+  }
+
+  /** The seller's context: saved as the note on every post from this batch, AI on. */
+  private async receiveContext(
+    batch: { id: string; orgId: string; awaitingContextPostId: string | null; publishedTargets: unknown },
+    text: string,
+    from: string,
+  ) {
+    if (/^(skip|nahi|no|baad me|later)[.!\s]*$/i.test(text)) return this.skipContext(batch.id, from);
+    const note = text.trim().slice(0, 1000);
+    if (note.length < MIN_POST_CONTEXT) {
+      await this.text(
+        from,
+        'Thoda aur batayiye: kya offer hai, kiske liye hai, koi khaas baat? Taaki AI customers ko sahi jawab de.',
+      );
+      return;
+    }
+    const postIds = publishedPostIds(batch);
+    const now = new Date();
+    const posts = await this.prisma.socialPost.findMany({
+      where: { orgId: batch.orgId, postId: { in: postIds } },
+      select: { postId: true, aiEnabled: true, aiEnabledAt: true },
+    });
+    let on = 0;
+    for (const p of posts) {
+      // A post the seller switched off by hand stays off; the rest turn on.
+      const turnOn = p.aiEnabled || !p.aiEnabledAt;
+      await this.prisma.socialPost.update({
+        where: { orgId_postId: { orgId: batch.orgId, postId: p.postId } },
+        data: {
+          note,
+          ...(turnOn && !p.aiEnabled ? { aiEnabled: true, aiEnabledAt: now, aiEnabledBy: 'WHATSAPP' } : {}),
+        },
+      });
+      if (turnOn) on += 1;
+    }
+    await this.stopWaitingForContext(batch.id);
+    await this.text(
+      from,
+      on
+        ? 'AI replies on ho gaye ✅ Is post ke comments aur DMs ka jawab ab AI dega.'
+        : 'Context save ho gaya. Is post ka AI aapne band kiya hua hai, dashboard ke "Post tags" se on kar sakte hain.',
+    );
+  }
+
+  private async skipContext(batchId: string, from: string) {
+    const batch = await this.prisma.storyBatch.findUnique({
+      where: { id: batchId },
+      select: { waRecipient: true, awaitingContextPostId: true },
+    });
+    if (!batch || batch.waRecipient !== from) return;
+    if (batch.awaitingContextPostId) await this.stopWaitingForContext(batchId);
+    await this.text(
+      from,
+      'Theek hai. Is post par AI band rahega. Kabhi bhi dashboard ke "Post tags" me context daal kar on kar sakte hain.',
+    );
   }
 
   async showOptions(batchId: string, from: string) {
@@ -1425,6 +1569,12 @@ export class StoriesService {
         ok.length ? '' : 'Dobara try karne ke liye "Post this" phir se dabaiye.',
       ];
       if (to) await this.text(to, lines.filter(Boolean).join('\n'));
+      // Feed posts and reels get comments; ask what they are about.
+      const posts = (result.published || []).filter((p) => ok.some(([d, r]) => d !== 'IG_STORY' && r.id === p.postId));
+      if (to && posts.length)
+        await this.askForContext(batch.id, to, posts).catch((e) =>
+          this.logger.warn(`Asking for the context of batch ${batch.id} failed: ${e.message}`),
+        );
       return ok.length > 0;
     } catch (e: any) {
       this.logger.error(`Post publish failed for batch ${batch.id}: ${e.message}`);
@@ -1569,7 +1719,7 @@ export class StoriesService {
       }
     }
     await this.rememberPublished(orgId, option.offeringId, caption, published);
-    return { targets, keywords, hashtags };
+    return { targets, keywords, hashtags, published };
   }
 
   /** Stores each published post's caption, and links it to its catalog item as confirmed. */
@@ -1747,6 +1897,16 @@ export function pickIntent(text: string): number | null {
 
 function editingMode(value: string | null | undefined): EditMode {
   return value === 'CAPTION' ? 'CAPTION' : 'IMAGE';
+}
+
+/** Post ids (not stories) that went live from this batch. */
+function publishedPostIds(batch: { awaitingContextPostId: string | null; publishedTargets: unknown }): string[] {
+  const targets = (batch.publishedTargets || {}) as Record<string, TargetResult>;
+  const ids = Object.entries(targets)
+    .filter(([d, r]) => d !== 'IG_STORY' && r?.ok && r.id)
+    .map(([, r]) => r.id as string);
+  if (batch.awaitingContextPostId) ids.push(batch.awaitingContextPostId);
+  return [...new Set(ids)];
 }
 
 function replyId(msg: any): string | undefined {

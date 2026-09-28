@@ -5,6 +5,7 @@ import {
   NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { reel2realSender } from '../../common/wa-sender';
@@ -13,6 +14,8 @@ import { PostsService, type ChannelPost } from '../posts/posts.service';
 import { GeminiClient } from '../stories/gemini.client';
 import { ReplyContextService } from './reply-context.service';
 import { priceLabel } from './industries';
+import { MIN_POST_CONTEXT, PostAiGateService } from './post-ai-gate.service';
+import { DmSpotlightService } from './dm-spotlight.service';
 
 const MAX_CANDIDATES = 60;
 const MAX_TAGS_PER_POST = 3;
@@ -48,7 +51,18 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     private readonly gemini: GeminiClient,
     private readonly context: ReplyContextService,
     private readonly metaPublisher: MetaPublisherService,
+    @Optional() private readonly gate?: PostAiGateService,
+    @Optional() private readonly spotlight?: DmSpotlightService,
   ) {}
+
+  /** Re-checks the post's AI switch after its context changed; never fails the caller. */
+  private async contextChanged(orgId: string, postId: string, by = 'SELLER') {
+    if (!this.gate) return null;
+    return this.gate.onContextChanged(orgId, postId, by).catch((e) => {
+      this.logger.warn(`Post AI check for ${postId} failed: ${e.message}`);
+      return null;
+    });
+  }
 
   onModuleInit() {
     if (process.env.NODE_ENV === 'test') return;
@@ -153,6 +167,11 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
         errors.push(`${ch.platform}: ${err.message}`);
         continue;
       }
+      // Spotlight posts deleted on Meta are skipped from now on.
+      if (this.spotlight)
+        await this.spotlight
+          .checkMissing(orgId, ch.id, posts.map((p) => p.id))
+          .catch((e) => this.logger.warn(`Spotlight check for ${ch.id} failed: ${e.message}`));
       for (const post of posts) {
         seen += 1;
         try {
@@ -523,7 +542,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
 
   // ------------------------------------------------------------ review API
 
-  async listLinks(orgId: string, status?: string) {
+  async listLinks(orgId: string, status?: string, ai?: string) {
     const links = await this.prisma.postOfferingLink.findMany({
       where: { orgId, ...(status ? { status } : {}) },
       include: {
@@ -546,6 +565,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     const blank = (s: (typeof socials)[number]) => ({
       postId: s.postId,
       platform: s.platform,
+      channelId: s.channelId,
       caption: s.caption,
       mediaUrl: s.mediaUrl,
       permalink: s.permalink,
@@ -560,6 +580,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
       const p = posts.get(l.postId) || {
         postId: l.postId,
         platform: l.platform,
+        channelId: s?.channelId ?? null,
         caption: l.caption ?? s?.caption ?? null,
         mediaUrl: l.mediaUrl ?? s?.mediaUrl ?? null,
         permalink: l.permalink ?? s?.permalink ?? null,
@@ -581,11 +602,49 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     if (!status) {
       for (const s of socials) if (!posts.has(s.postId)) posts.set(s.postId, blank(s));
     }
+    const ids = [...posts.keys()];
+    const [spotlit, answered, onSet] = await Promise.all([
+      this.prisma.dmSpotlight.findMany({
+        where: { orgId, postId: { in: ids } },
+        select: { postId: true },
+      }),
+      this.prisma.commentReplyJob.findMany({
+        where: { orgId, status: 'SENT', thread: { postId: { in: ids } } },
+        select: { thread: { select: { postId: true } } },
+      }),
+      this.gate ? this.gate.onPosts(orgId, ids) : Promise.resolve(new Set<string>()),
+    ]);
+    const inSpotlight = new Set(spotlit.map((x) => x.postId));
+    const answeredCount = new Map<string, number>();
+    for (const j of answered)
+      answeredCount.set(j.thread.postId, (answeredCount.get(j.thread.postId) || 0) + 1);
+    let list = [...posts.values()].map((p) => {
+      const sp = social.get(p.postId);
+      const confirmed = p.tags.some(
+        (t: any) => t.status === 'SELLER_CONFIRMED' && t.offering?.isActive !== false,
+      );
+      const noted = (p.note?.trim().length || 0) >= MIN_POST_CONTEXT;
+      const hasContext = p.source === 'DAILY_POST' ? noted : noted || confirmed;
+      return {
+        ...p,
+        aiEnabled: Boolean(sp?.aiEnabled),
+        aiOn: onSet.has(p.postId),
+        hasContext,
+        // Daily posts wait for the seller's context before the AI can be on.
+        needsContext: !hasContext && (p.source === 'DAILY_POST' || !p.tags.length),
+        inSpotlight: inSpotlight.has(p.postId),
+        answeredCount: answeredCount.get(p.postId) || 0,
+      };
+    });
+    if (ai === 'on') list = list.filter((p) => p.aiOn);
+    else if (ai === 'off') list = list.filter((p) => !p.aiOn);
+    else if (ai === 'untagged') list = list.filter((p) => !p.tags.length);
+    else if (ai === 'needs_context') list = list.filter((p) => p.needsContext);
     const lastRun = await this.prisma.postTagRun.findFirst({
       where: { orgId },
       orderBy: { createdAt: 'desc' },
     });
-    return { posts: [...posts.values()], lastRun };
+    return { posts: list, lastRun };
   }
 
   /**
@@ -606,7 +665,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
   ) {
     if (!postId) throw new BadRequestException('postId is required');
     const note = input.note?.trim().slice(0, MAX_NOTE) || null;
-    return this.prisma.socialPost.upsert({
+    const saved = await this.prisma.socialPost.upsert({
       where: { orgId_postId: { orgId, postId } },
       update: { note },
       create: {
@@ -619,6 +678,8 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
         note,
       },
     });
+    const ai = await this.contextChanged(orgId, postId);
+    return { ...saved, ...(ai ? { aiEnabled: ai.aiEnabled, aiOn: ai.on, hasContext: ai.hasContext } : {}) };
   }
 
   async setStatus(orgId: string, linkId: string, status: string) {
@@ -630,10 +691,41 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
       where: { id: linkId, orgId },
     });
     if (!link) throw new NotFoundException('Tag not found');
-    return this.prisma.postOfferingLink.update({
+    const updated = await this.prisma.postOfferingLink.update({
       where: { id: linkId },
       data: { status },
     });
+    // A confirmed item turns a never-switched post on; the last item rejected
+    // (with no note) turns it off. The post needs a record for its switch.
+    if (this.gate && status === 'SELLER_CONFIRMED') await this.ensureSocialPost(orgId, link);
+    await this.contextChanged(orgId, link.postId);
+    return updated;
+  }
+
+  private async ensureSocialPost(
+    orgId: string,
+    post: {
+      postId: string;
+      platform: string;
+      caption?: string | null;
+      mediaUrl?: string | null;
+      permalink?: string | null;
+    },
+  ) {
+    await this.prisma.socialPost
+      .upsert({
+        where: { orgId_postId: { orgId, postId: post.postId } },
+        update: {},
+        create: {
+          orgId,
+          postId: post.postId,
+          platform: post.platform || 'INSTAGRAM',
+          caption: post.caption?.slice(0, 2000) || null,
+          mediaUrl: post.mediaUrl || null,
+          permalink: post.permalink || null,
+        },
+      })
+      .catch(() => undefined);
   }
 
   async addLink(
@@ -652,7 +744,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     });
     if (!offering) throw new NotFoundException('Offering not found');
     if (!input.postId) throw new BadRequestException('postId is required');
-    return this.prisma.postOfferingLink.upsert({
+    const link = await this.prisma.postOfferingLink.upsert({
       where: {
         postId_offeringId: {
           postId: input.postId,
@@ -673,6 +765,9 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
         reason: 'Added by seller',
       },
     });
+    if (this.gate) await this.ensureSocialPost(orgId, input);
+    await this.contextChanged(orgId, input.postId);
+    return link;
   }
 
   /**

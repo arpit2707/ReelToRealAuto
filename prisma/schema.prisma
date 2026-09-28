@@ -83,6 +83,9 @@ model Organization {
   postTagRuns       PostTagRun[]
   pageProfiles      PageProfile[]
   socialPosts       SocialPost[]
+  commentThreads    CommentThread[]
+  commentReplyJobs  CommentReplyJob[]
+  dmSpotlights      DmSpotlight[]
 }
 
 model OrganizationMember {
@@ -192,6 +195,11 @@ model Conversation {
   // What the AI has learned so far in this chat (date, city, guests, chosen
   // offering) so it never asks the same question twice.
   goalState       Json?
+  // Where the chat started: the post, and how (comment | story | share | ad |
+  // spotlight). Null for a plain DM.
+  sourcePostId    String?
+  sourcePlatform  String?
+  sourceKind      String?
   leads           Lead[]
   updatedAt       DateTime       @updatedAt
 
@@ -528,6 +536,9 @@ model StoryBatch {
   editingStartedAt DateTime?
   // When the picked option is due to go live (status SCHEDULED).
   scheduledFor     DateTime?
+  // A published post waiting for the seller's context on WhatsApp (48h).
+  awaitingContextPostId String?
+  awaitingContextAt     DateTime?
   // { IG_STORY: { ok, id?, error? }, ... }
   publishedTargets Json?
   error            Json?
@@ -585,6 +596,10 @@ model PageProfile {
   faqs        Json?
   // When set, replies on this page only suggest these catalog items.
   offeringIds String[]     @default([])
+  // PRODUCTS | SERVICES | BOTH; null follows the business profile.
+  offerType   String?
+  // Examples for an open question ("bridal makeup", "lehenga").
+  categories  String[]     @default([])
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
@@ -608,10 +623,103 @@ model SocialPost {
   source    String       @default("META")
   // When the AI last matched it against the catalog; null means not yet.
   taggedAt  DateTime?
+  // The AI answers comments (and uses the post in DMs) only when this is on
+  // and the post has context: a confirmed item or the seller's note.
+  aiEnabled          Boolean   @default(false)
+  aiEnabledAt        DateTime?
+  // User id, or WHATSAPP / SYSTEM / BACKFILL.
+  aiEnabledBy        String?
+  // Daily posts: when we asked the seller on WhatsApp for the post's context.
+  contextRequestedAt DateTime?
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 
   @@unique([orgId, postId])
+}
+
+// One record per root (top-level) comment; replies under it join this record.
+model CommentThread {
+  id             String            @id @default(uuid())
+  orgId          String
+  org            Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  channelId      String
+  platform       String
+  postId         String
+  rootCommentId  String
+  rootAuthorId   String?
+  rootAuthorName String?
+  conversationId String?
+  // The Private Reply (DM) that went to the root commenter, if any.
+  dmSentAt       DateTime?
+  dmRecipientId  String?
+  replyCount     Int               @default(0)
+  lastReplyAt    DateTime?
+  // OPEN | DELETED | ADOPTED (a reply whose root we never saw)
+  status         String            @default("OPEN")
+  jobs           CommentReplyJob[]
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@unique([orgId, rootCommentId])
+  @@index([orgId, postId])
+  @@index([channelId, postId, rootAuthorId])
+}
+
+// One queued answer per comment: survives restarts, and the unique commentId
+// means a comment is never answered twice.
+model CommentReplyJob {
+  id          String        @id @default(uuid())
+  orgId       String
+  org         Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  channelId   String
+  threadId    String
+  thread      CommentThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  commentId   String        @unique
+  // The commenter's inbox chat, where the comment and our answer are saved.
+  conversationId String?
+  authorId    String?
+  authorName  String?
+  text        String
+  isRoot      Boolean       @default(false)
+  // QUEUED | SENDING | SENT | SKIPPED | FAILED
+  status      String        @default("QUEUED")
+  publicReply String?
+  privateDm   String?
+  dmSent      Boolean       @default(false)
+  // Our own reply's comment id, so its webhook echo is ignored.
+  replyCommentId String?
+  error       String?
+  // REPLY (needs the post's AI on) | CRISIS (helplines; skips that check)
+  kind        String        @default("REPLY")
+  commentAt   DateTime?
+  runAfter    DateTime      @default(now())
+  attempts    Int           @default(0)
+  sentAt      DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([channelId, status, runAfter])
+  @@index([threadId])
+}
+
+// AI-on posts a page highlights when someone DMs without a post ("hi", "price list").
+model DmSpotlight {
+  id        String       @id @default(uuid())
+  orgId     String
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  channelId String
+  postId    String
+  position  Int          @default(0)
+  label     String?
+  startsAt  DateTime?
+  endsAt    DateTime?
+  // Set when Meta says the post no longer exists; the post is skipped.
+  missingAt DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@unique([channelId, postId])
+  @@index([orgId, channelId])
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +755,8 @@ model BusinessProfile {
   services      String[]     @default([])
   onboardedAt   DateTime?
   activatedAt   DateTime?
+  // What the business sells: PRODUCTS | SERVICES | BOTH.
+  offerType     String?
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 }

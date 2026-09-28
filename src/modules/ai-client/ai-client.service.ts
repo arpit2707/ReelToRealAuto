@@ -31,6 +31,17 @@ export interface GenerateReplyPayload {
   offerings?: Array<Record<string, unknown>>;
   goal_state?: Record<string, unknown>;
   recent_messages?: Array<{ from: string; text: string }>;
+  // Plain DMs: posts the seller highlights, and the links a reply may share.
+  spotlight?: Array<{
+    post_id: string;
+    label: string | null;
+    caption: string | null;
+    permalink: string | null;
+    offering_ids: string[];
+  }>;
+  allowed_links?: string[];
+  // Who a public comment reply answers (the backend adds the @tag).
+  comment_author?: string;
   // We only call when this chat should get an AI answer (our own hand-off
   // pause is over or the seller pressed Resume), so reopen it on the AI side.
   resume_if_pending?: boolean;
@@ -55,6 +66,8 @@ export interface GeneratedReplyResult {
   // Why the AI handed over: human_request, complaint, order_support,
   // purchase_assistance, missing_information, generation_unavailable, …
   handoff_reason?: string | null;
+  // PRODUCTS or SERVICES once a customer on a "both" page made it clear.
+  offering_type?: string | null;
 }
 
 @Injectable()

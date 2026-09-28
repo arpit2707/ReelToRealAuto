@@ -46,6 +46,89 @@ export class MetaPublisherService {
     );
   }
 
+  /**
+   * Public reply that also returns the new comment's id, so its webhook echo
+   * can be recognised as ours. `status` is Meta's HTTP status (0 = network).
+   */
+  async replyToCommentWithId(
+    platform: 'INSTAGRAM' | 'FACEBOOK',
+    commentId: string,
+    message: string,
+    accessToken: string,
+  ): Promise<{ ok: boolean; id?: string; status?: number; error?: string }> {
+    if (!accessToken || accessToken.startsWith('mock_')) {
+      return { ok: false, status: 401, error: 'This channel has no valid access token. Reconnect it.' };
+    }
+    const edge = platform === 'INSTAGRAM' ? 'replies' : 'comments';
+    try {
+      const res = await fetch(graphUrl(`/${commentId}/${edge}`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ message }),
+      });
+      const body = await res.text();
+      if (!res.ok) {
+        this.logger.error(`Failed to post comment reply: ${body}`);
+        return { ok: false, status: res.status, error: metaErrorMessage(body) };
+      }
+      let id: string | undefined;
+      try {
+        id = JSON.parse(body)?.id;
+      } catch {
+        id = undefined;
+      }
+      return { ok: true, id, status: res.status };
+    } catch (err: any) {
+      this.logger.error(`Error in replyToCommentWithId: ${err.message}`);
+      return { ok: false, status: 0, error: err.message };
+    }
+  }
+
+  /**
+   * Private Reply: a DM to the person who wrote a comment, addressed by the
+   * comment id (recipient.comment_id). Meta allows one per comment, within 7
+   * days of it. The response's recipient_id is the person's messaging id.
+   */
+  async sendPrivateReply(
+    commentId: string,
+    message: string,
+    accessToken: string,
+  ): Promise<{ ok: boolean; recipientId?: string; messageId?: string; status?: number; error?: string }> {
+    if (!accessToken || accessToken.startsWith('mock_')) {
+      return { ok: false, status: 401, error: 'This channel has no valid access token. Reconnect it.' };
+    }
+    try {
+      const res = await fetch(graphUrl('/me/messages'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({
+          recipient: { comment_id: commentId },
+          message: { text: message },
+        }),
+      });
+      const body = await res.text();
+      if (!res.ok) {
+        this.logger.warn(`Private reply to comment ${commentId} failed: ${body}`);
+        return { ok: false, status: res.status, error: metaErrorMessage(body) };
+      }
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        parsed = {};
+      }
+      return {
+        ok: true,
+        status: res.status,
+        recipientId: parsed?.recipient_id,
+        messageId: parsed?.message_id,
+      };
+    } catch (err: any) {
+      this.logger.error(`Error in sendPrivateReply: ${err.message}`);
+      return { ok: false, status: 0, error: err.message };
+    }
+  }
+
   private async postCommentReply(
     commentId: string,
     edge: 'replies' | 'comments',

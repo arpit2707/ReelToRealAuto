@@ -78,7 +78,13 @@ function makeService(settingsOver: any = {}) {
     },
     offering: { findMany: jest.fn().mockResolvedValue([]) },
     pageProfile: { findFirst: jest.fn().mockResolvedValue(null) },
-    socialPost: { upsert: jest.fn().mockResolvedValue({}) },
+    socialPost: {
+      upsert: jest.fn().mockResolvedValue({}),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      findMany: jest.fn().mockResolvedValue([]),
+      findUnique: jest.fn().mockResolvedValue(null),
+      update: jest.fn().mockResolvedValue({}),
+    },
     postOfferingLink: { upsert: jest.fn().mockResolvedValue({}) },
     storyBatch: {
       findUnique: jest.fn(),
@@ -148,6 +154,12 @@ function makeService(settingsOver: any = {}) {
   const service = new StoriesService(prisma, crypto, meta, gemini, keywords);
   return { service, prisma, meta, gemini, keywords, settings };
 }
+
+// The batch update that recorded the publish result.
+const statusUpdate = (prisma: any) =>
+  prisma.storyBatch.update.mock.calls.map((c: any) => c[0].data).find((d: any) => d.status);
+const liveMessage = (meta: any) =>
+  meta.sendWhatsAppMessage.mock.calls.map((c: any) => c[2]).find((m: string) => m.startsWith('Post'));
 
 const openBatch = (over: any = {}) => ({
   id: 'b1',
@@ -551,16 +563,14 @@ describe('StoriesService', () => {
       expect(feedUrl).toContain('/media/o2/feed/');
       expect(caption).toBe('Book your bridal trial today.\n\n#bridalmakeup #hdmakeup');
       expect(meta.publishFacebookPhoto.mock.calls[0][0]).toBe('page9');
-      const last = prisma.storyBatch.update.mock.calls.at(-1)[0].data;
+      const last = statusUpdate(prisma);
       expect(last.status).toBe('PUBLISHED');
       expect(last.publishedTargets).toEqual({
         IG_STORY: { ok: true, id: 'story99' },
         IG_FEED: { ok: true, id: 'feed99' },
         FB_FEED: { ok: true, id: 'fb99' },
       });
-      expect(meta.sendWhatsAppMessage.mock.calls.at(-1)[2]).toContain(
-        'Post live hai: Instagram story, Instagram post, Facebook post.',
-      );
+      expect(liveMessage(meta)).toContain('Post live hai: Instagram story, Instagram post, Facebook post.');
     });
 
     it('reports a partial failure without failing the rest', async () => {
@@ -578,10 +588,10 @@ describe('StoriesService', () => {
 
       await service.publishBatch('b1');
 
-      const last = prisma.storyBatch.update.mock.calls.at(-1)[0].data;
+      const last = statusUpdate(prisma);
       expect(last.status).toBe('PUBLISHED');
       expect(last.publishedTargets.FB_FEED.ok).toBe(false);
-      const msg = meta.sendWhatsAppMessage.mock.calls.at(-1)[2];
+      const msg = liveMessage(meta);
       expect(msg).toContain('Post live hai: Instagram post.');
       expect(msg).toContain('Facebook post: Facebook Facebook photo post failed');
     });
@@ -1278,5 +1288,133 @@ describe('content autopilot', () => {
         destinations: ['IG_REEL', 'IG_STORY'],
       });
     });
+  });
+});
+
+describe('daily post context', () => {
+  beforeEach(() => {
+    process.env.STORY_WA_PHONE_NUMBER_ID = 'platform-phone';
+    process.env.STORY_WA_ACCESS_TOKEN = 'platform-token';
+    process.env.STORY_MEDIA_SECRET = 'media-secret';
+  });
+  afterEach(() => {
+    for (const k of ['STORY_WA_PHONE_NUMBER_ID', 'STORY_WA_ACCESS_TOKEN', 'STORY_MEDIA_SECRET']) delete process.env[k];
+  });
+
+  const option = {
+    id: 'o2',
+    title: 'Bridal glow',
+    caption: 'Book your bridal trial today.',
+    imageData: Buffer.from('draft'),
+    batch: { trendKeywords: [] },
+  };
+  const waiting = (over: any = {}) => ({
+    id: 'b1',
+    orgId: 'org1',
+    awaitingContextPostId: 'feed99',
+    publishedTargets: { IG_STORY: { ok: true, id: 'story99' }, IG_FEED: { ok: true, id: 'feed99' } },
+    ...over,
+  });
+  const texts = (meta: any) => meta.sendWhatsAppMessage.mock.calls.map((c: any) => c[2]);
+
+  it('asks for the context of feed posts (not stories) after publishing, with Skip', async () => {
+    const { service, prisma, meta } = makeService({ destinations: ['IG_STORY', 'IG_FEED'] });
+    prisma.storyBatch.findUnique.mockResolvedValue({ id: 'b1', orgId: 'org1', selectedOptionId: 'o2', waRecipient: MERCHANT });
+    prisma.storyOption.findUnique.mockResolvedValue(option);
+    meta.sendInteractiveButtonMessage.mockResolvedValue(true);
+
+    await service.publishBatch('b1');
+
+    const wait = prisma.storyBatch.update.mock.calls.map((c: any) => c[0].data).find((d: any) => d.awaitingContextPostId);
+    expect(wait).toEqual({ awaitingContextPostId: 'feed99', awaitingContextAt: expect.any(Date) });
+    expect(prisma.socialPost.updateMany.mock.calls[0][0]).toMatchObject({
+      where: { postId: { in: ['feed99'] } },
+      data: { contextRequestedAt: expect.any(Date) },
+    });
+    const [, to, , body, , buttons] = meta.sendInteractiveButtonMessage.mock.calls.at(-1);
+    expect(to).toBe(MERCHANT);
+    expect(body).toContain('kam se kam 20 akshar');
+    expect(buttons).toEqual([{ id: 'STORY_CTXSKIP_b1', title: 'Skip' }]);
+  });
+
+  it('a story-only publish asks nothing', async () => {
+    const { service, prisma, meta } = makeService({ destinations: ['IG_STORY'] });
+    prisma.storyBatch.findUnique.mockResolvedValue({ id: 'b1', orgId: 'org1', selectedOptionId: 'o2', waRecipient: MERCHANT });
+    prisma.storyOption.findUnique.mockResolvedValue(option);
+    await service.publishBatch('b1');
+    expect(meta.sendInteractiveButtonMessage).not.toHaveBeenCalled();
+  });
+
+  it('free text while waiting is the context: note saved, AI on, confirmed', async () => {
+    const { service, prisma, meta } = makeService();
+    prisma.storyBatch.findFirst.mockImplementation(async ({ where }: any) =>
+      where.awaitingContextPostId ? waiting() : null,
+    );
+    prisma.socialPost.findMany.mockResolvedValue([{ postId: 'feed99', aiEnabled: false, aiEnabledAt: null }]);
+    const msg = { from: MERCHANT, text: { body: 'Diwali offer: bridal trial ₹999, sirf is hafte Patna mein' } };
+
+    expect(await service.isStoryReply(msg, 'platform-phone')).toBe(true);
+    await service.handleWhatsAppReply(msg);
+
+    expect(prisma.socialPost.update.mock.calls[0][0]).toEqual({
+      where: { orgId_postId: { orgId: 'org1', postId: 'feed99' } },
+      data: {
+        note: 'Diwali offer: bridal trial ₹999, sirf is hafte Patna mein',
+        aiEnabled: true,
+        aiEnabledAt: expect.any(Date),
+        aiEnabledBy: 'WHATSAPP',
+      },
+    });
+    expect(prisma.storyBatch.update).toHaveBeenCalledWith({
+      where: { id: 'b1' },
+      data: { awaitingContextPostId: null, awaitingContextAt: null },
+    });
+    expect(texts(meta).at(-1)).toContain('AI replies on ho gaye ✅');
+  });
+
+  it('too short asks for more and keeps waiting', async () => {
+    const { service, prisma, meta } = makeService();
+    prisma.storyBatch.findFirst.mockImplementation(async ({ where }: any) =>
+      where.awaitingContextPostId ? waiting() : null,
+    );
+    await service.handleWhatsAppReply({ from: MERCHANT, text: { body: 'saree offer' } });
+    expect(prisma.socialPost.update).not.toHaveBeenCalled();
+    expect(prisma.storyBatch.update).not.toHaveBeenCalled();
+    expect(texts(meta).at(-1)).toContain('Thoda aur batayiye');
+  });
+
+  it('Skip stops waiting and leaves the AI off', async () => {
+    const { service, prisma, meta } = makeService();
+    prisma.storyBatch.findUnique.mockResolvedValue({ waRecipient: MERCHANT, awaitingContextPostId: 'feed99' });
+    const msg = { from: MERCHANT, interactive: { button_reply: { id: 'STORY_CTXSKIP_b1' } } };
+    expect(await service.isStoryReply(msg, 'any')).toBe(true);
+    await service.handleWhatsAppReply(msg);
+    expect(prisma.storyBatch.update).toHaveBeenCalledWith({
+      where: { id: 'b1' },
+      data: { awaitingContextPostId: null, awaitingContextAt: null },
+    });
+    expect(prisma.socialPost.update).not.toHaveBeenCalled();
+    expect(texts(meta).at(-1)).toContain('AI band rahega');
+  });
+
+  it('context already added in the dashboard ends the wait; the chat is not ours', async () => {
+    const { service, prisma } = makeService();
+    prisma.storyBatch.findFirst.mockImplementation(async ({ where }: any) =>
+      where.awaitingContextPostId ? waiting() : null,
+    );
+    prisma.socialPost.findUnique.mockResolvedValue({ note: 'Bridal trial offer for this week only' });
+    expect(await service.isStoryReply({ from: MERCHANT, text: { body: 'hello ji' } }, 'platform-phone')).toBe(false);
+    expect(prisma.storyBatch.update).toHaveBeenCalledWith({
+      where: { id: 'b1' },
+      data: { awaitingContextPostId: null, awaitingContextAt: null },
+    });
+  });
+
+  it('the wait lasts 48 hours', async () => {
+    const { service, prisma } = makeService();
+    prisma.storyBatch.findFirst.mockResolvedValue(null);
+    expect(await service.isStoryReply({ from: MERCHANT, text: { body: 'kuch bhi likha' } }, 'platform-phone')).toBe(false);
+    const where = prisma.storyBatch.findFirst.mock.calls.at(-1)[0].where;
+    expect(Date.now() - where.awaitingContextAt.gt.getTime()).toBeGreaterThanOrEqual(48 * 60 * 60 * 1000 - 1000);
   });
 });

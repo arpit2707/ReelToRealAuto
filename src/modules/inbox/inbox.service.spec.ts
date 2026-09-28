@@ -22,7 +22,10 @@ describe('InboxService.reply', () => {
 
   function build(sendResult: boolean) {
     const prisma = {
-      conversation: { findFirst: jest.fn().mockResolvedValue(conversation) },
+      conversation: {
+        findFirst: jest.fn().mockResolvedValue(conversation),
+        update: jest.fn().mockResolvedValue({}),
+      },
     };
     const crypto = { decrypt: jest.fn().mockReturnValue('page-b-token') };
     const metaPublisher = {
