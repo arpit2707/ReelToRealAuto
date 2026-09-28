@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS "DmSpotlight" (
     "label" TEXT,
     "startsAt" TIMESTAMP(3),
     "endsAt" TIMESTAMP(3),
+    "missingAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "DmSpotlight_pkey" PRIMARY KEY ("id")

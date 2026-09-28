@@ -9,6 +9,7 @@ import {
   type IndustryTemplate,
 } from './industries';
 import { PostAiGateService } from './post-ai-gate.service';
+import { DmSpotlightService, type SpotlightForAi } from './dm-spotlight.service';
 
 // Suggested links below this confidence are ignored until the seller confirms
 // them, so a wrong guess does not put the wrong price in front of a customer.
@@ -110,6 +111,10 @@ export type ReplyContext = {
   template: IndustryTemplate;
   // Every catalog price the reply may mention; used by the price guard.
   allowed_prices: number[];
+  // Plain DMs only: the page's highlighted posts, and the links (their
+  // permalinks) the reply may share besides the catalog's own.
+  spotlight: SpotlightForAi[];
+  allowed_links: string[];
 };
 
 const STOP = new Set(
@@ -132,6 +137,7 @@ export class ReplyContextService {
     private readonly prisma: PrismaService,
     private readonly catalog: CatalogService,
     @Optional() private readonly gate?: PostAiGateService,
+    @Optional() private readonly spotlightService?: DmSpotlightService,
   ) {}
 
   /**
@@ -212,6 +218,14 @@ export class ReplyContextService {
     const rememberedIds = (goalState.offeringIds || []).filter(
       (id) => !pageItems || pageItems.includes(id),
     );
+    // A plain DM (no AI-on post): the page's Spotlight posts and their items.
+    const spotlight =
+      !postId && input.channelId && this.spotlightService
+        ? await this.spotlightService
+            .forDm(input.orgId, input.channelId)
+            .catch(() => [] as SpotlightForAi[])
+        : [];
+    const spotlightIds = spotlight.flatMap((s) => s.offering_ids);
     const searched = await this.search(
       input.orgId,
       input.text,
@@ -233,6 +247,7 @@ export class ReplyContextService {
         ...linkedIds,
         ...rememberedIds,
         ...searched.map((s) => s.id),
+        ...spotlightIds,
       ]),
     ].slice(0, MAX_OFFERINGS);
     // Nothing matched ("hi", "price list", "kya naya hai"): a few items of the
@@ -285,9 +300,13 @@ export class ReplyContextService {
           ? 'post'
           : rememberedIds.includes(o.id)
             ? 'chat'
-            : overviewIds.includes(o.id)
-              ? 'overview'
-              : 'search') as OfferingMatch,
+            : searched.some((s) => s.id === o.id)
+              ? 'search'
+              : spotlightIds.includes(o.id)
+                ? 'spotlight'
+                : overviewIds.includes(o.id)
+                  ? 'overview'
+                  : 'search') as OfferingMatch,
         ...(availability.length
           ? {
               availability: availability
@@ -361,6 +380,10 @@ export class ReplyContextService {
       })),
       template,
       allowed_prices: [...allowed],
+      spotlight,
+      allowed_links: spotlight
+        .map((s) => s.permalink)
+        .filter((l): l is string => Boolean(l)),
     };
   }
 

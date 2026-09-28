@@ -22,6 +22,7 @@ import { PostTaggingService } from './post-tagging.service';
 import { LeadsService } from './leads.service';
 import { ReplyEngineService } from './reply-engine.service';
 import { PostAiGateService } from './post-ai-gate.service';
+import { DmSpotlightService, type SpotlightInput } from './dm-spotlight.service';
 
 @Controller('api/catalog')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -31,6 +32,7 @@ export class CatalogController {
     private readonly tagging: PostTaggingService,
     private readonly engine: ReplyEngineService,
     private readonly gate: PostAiGateService,
+    private readonly spotlight: DmSpotlightService,
   ) {}
 
   @Get('profile')
@@ -214,6 +216,26 @@ export class CatalogController {
     @Body() body: PageProfileInput,
   ) {
     return this.catalog.savePageProfile(user.orgId, channelId, body || {});
+  }
+
+  /** Posts highlighted in plain DMs on this page, with their live status. */
+  @Get('pages/:channelId/spotlight')
+  pageSpotlight(
+    @CurrentUser() user: JwtPayload,
+    @Param('channelId') channelId: string,
+  ) {
+    return this.spotlight.list(user.orgId, channelId);
+  }
+
+  /** Replaces the page's whole Spotlight list (max 5, AI-on posts only). */
+  @Put('pages/:channelId/spotlight')
+  @Roles('OWNER', 'ADMIN')
+  savePageSpotlight(
+    @CurrentUser() user: JwtPayload,
+    @Param('channelId') channelId: string,
+    @Body() body: { posts?: SpotlightInput[] },
+  ) {
+    return this.spotlight.replace(user.orgId, channelId, body?.posts || []);
   }
 
   @Get('ad-picks')

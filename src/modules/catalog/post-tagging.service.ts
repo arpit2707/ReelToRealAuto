@@ -15,6 +15,7 @@ import { GeminiClient } from '../stories/gemini.client';
 import { ReplyContextService } from './reply-context.service';
 import { priceLabel } from './industries';
 import { MIN_POST_CONTEXT, PostAiGateService } from './post-ai-gate.service';
+import { DmSpotlightService } from './dm-spotlight.service';
 
 const MAX_CANDIDATES = 60;
 const MAX_TAGS_PER_POST = 3;
@@ -51,6 +52,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     private readonly context: ReplyContextService,
     private readonly metaPublisher: MetaPublisherService,
     @Optional() private readonly gate?: PostAiGateService,
+    @Optional() private readonly spotlight?: DmSpotlightService,
   ) {}
 
   /** Re-checks the post's AI switch after its context changed; never fails the caller. */
@@ -165,6 +167,11 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
         errors.push(`${ch.platform}: ${err.message}`);
         continue;
       }
+      // Spotlight posts deleted on Meta are skipped from now on.
+      if (this.spotlight)
+        await this.spotlight
+          .checkMissing(orgId, ch.id, posts.map((p) => p.id))
+          .catch((e) => this.logger.warn(`Spotlight check for ${ch.id} failed: ${e.message}`));
       for (const post of posts) {
         seen += 1;
         try {

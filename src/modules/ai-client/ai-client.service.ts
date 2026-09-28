@@ -31,6 +31,15 @@ export interface GenerateReplyPayload {
   offerings?: Array<Record<string, unknown>>;
   goal_state?: Record<string, unknown>;
   recent_messages?: Array<{ from: string; text: string }>;
+  // Plain DMs: posts the seller highlights, and the links a reply may share.
+  spotlight?: Array<{
+    post_id: string;
+    label: string | null;
+    caption: string | null;
+    permalink: string | null;
+    offering_ids: string[];
+  }>;
+  allowed_links?: string[];
   // Who a public comment reply answers (the backend adds the @tag).
   comment_author?: string;
   // We only call when this chat should get an AI answer (our own hand-off

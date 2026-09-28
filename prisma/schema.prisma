@@ -713,6 +713,8 @@ model DmSpotlight {
   label     String?
   startsAt  DateTime?
   endsAt    DateTime?
+  // Set when Meta says the post no longer exists; the post is skipped.
+  missingAt DateTime?
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 

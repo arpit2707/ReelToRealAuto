@@ -252,6 +252,8 @@ export class ReplyEngineService {
       offerings: ctx.offerings,
       goal_state: ctx.goal_state as Record<string, unknown>,
       recent_messages: ctx.recent_messages,
+      ...(ctx.spotlight?.length ? { spotlight: ctx.spotlight } : {}),
+      ...(ctx.allowed_links?.length ? { allowed_links: ctx.allowed_links } : {}),
       ...(req.eventType === 'comment' && req.commentAuthor
         ? { comment_author: req.commentAuthor }
         : {}),
