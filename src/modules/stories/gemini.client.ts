@@ -80,7 +80,7 @@ export class GeminiClient {
   }
 
   private textModel() {
-    return process.env.GEMINI_TEXT_MODEL || 'gemini-2.5-flash';
+    return process.env.GEMINI_TEXT_MODEL || 'gemini-3.8-flash';
   }
 
   private imageModel() {
