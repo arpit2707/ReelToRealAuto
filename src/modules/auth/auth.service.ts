@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
 import * as crypto from 'crypto';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -13,6 +13,7 @@ export class AuthService {
   }
 
   async register(email: string, password: string, name?: string, orgName?: string) {
+    requireCredentials(email, password);
     const existing = await this.prisma.user.findUnique({ where: { email: email.toLowerCase() } });
     if (existing) throw new ConflictException('Email already registered');
     const passwordHash = await bcrypt.hash(password, 12);
@@ -36,6 +37,7 @@ export class AuthService {
   }
 
   async login(email: string, password: string) {
+    requireCredentials(email, password);
     const user = await this.prisma.user.findUnique({ where: { email: email.toLowerCase() } });
     if (!user?.passwordHash) throw new UnauthorizedException('Invalid email or password');
     const ok = await bcrypt.compare(password, user.passwordHash);
@@ -114,5 +116,12 @@ export class AuthService {
       },
     });
     return { accessToken, refreshToken, expiresIn: 15 * 60 };
+  }
+}
+
+/** A missing or non-text email/password is the client's mistake (400), not a crash (500). */
+function requireCredentials(email: unknown, password: unknown): asserts email is string {
+  if (typeof email !== 'string' || !email.trim() || typeof password !== 'string' || !password) {
+    throw new BadRequestException('Email and password are required');
   }
 }

@@ -132,14 +132,20 @@ export class CatalogController {
     return this.catalog.clearBlockedDate(user.orgId, id, date);
   }
 
-  // ai=on|off|untagged|needs_context narrows the list.
+  // ai=review|on|off|untagged|needs_context narrows the list; page=N returns
+  // `limit` posts (default 10) of it.
   @Get('post-tags')
   postTags(
     @CurrentUser() user: JwtPayload,
     @Query('status') status?: string,
     @Query('ai') ai?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
   ) {
-    return this.tagging.listLinks(user.orgId, status || undefined, ai || undefined);
+    return this.tagging.listLinks(user.orgId, status || undefined, ai || undefined, {
+      page: Number(page) || undefined,
+      limit: Number(limit) || undefined,
+    });
   }
 
   @Post('post-tags/run')

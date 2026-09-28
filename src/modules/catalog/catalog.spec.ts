@@ -490,9 +490,59 @@ describe('PostTaggingService', () => {
     const { service, prisma, posts } = make();
     await service.ensurePostContext('org', 'ch1', 'media1');
     expect(posts.getPost).toHaveBeenCalledWith('org', 'ch1', 'media1');
-    const saved = prisma.socialPost.upsert.mock.calls[0][0];
-    expect(saved.create).toMatchObject({ postId: 'media1', caption: 'New kurta drop', channelId: 'ch1' });
-    expect(saved.create.taggedAt).toBeInstanceOf(Date);
+    // Listed first (so a failed AI call still shows it), then marked tagged.
+    const [listed, tagged] = prisma.socialPost.upsert.mock.calls.map((c: any) => c[0]);
+    expect(listed.create).toMatchObject({ postId: 'media1', caption: 'New kurta drop', channelId: 'ch1', taggedAt: null });
+    expect(tagged.update.taggedAt).toBeInstanceOf(Date);
+  });
+
+  it('still lists the post when the AI match fails', async () => {
+    const { service, prisma } = make();
+    prisma.offering.findMany.mockRejectedValue(new Error('Gemini down'));
+    await expect(service.ensurePostContext('org', 'ch1', 'media1')).rejects.toThrow('Gemini down');
+    expect(prisma.socialPost.upsert).toHaveBeenCalledTimes(1);
+    expect(prisma.socialPost.upsert.mock.calls[0][0].create).toMatchObject({ postId: 'media1', taggedAt: null });
+  });
+
+  it('with auto-match off, brings in every post without the AI or a catalog', async () => {
+    const { service, prisma, posts } = make();
+    prisma.businessProfile.findUnique.mockResolvedValue({ autoTagPosts: false });
+    prisma.offering.count.mockResolvedValue(0);
+    prisma.channel.findMany = jest.fn().mockResolvedValue([{ id: 'ch1', platform: 'INSTAGRAM' }]);
+    prisma.postTagRun.create = jest.fn().mockResolvedValue({ id: 'run1' });
+    prisma.postTagRun.update = jest.fn(async ({ data }: any) => data);
+    posts.allPosts = jest.fn().mockResolvedValue(
+      Array.from({ length: 15 }, (_, i) => ({ id: `m${i}`, text: '', mediaUrl: null, permalink: null, createdAt: '2026-09-01T10:00:00+0000', likes: i, commentsCount: 0 })),
+    );
+    const run = await service.run('org');
+    expect(run).toMatchObject({ status: 'DONE', postsSeen: 15, suggested: 0 });
+    expect(prisma.socialPost.upsert).toHaveBeenCalledTimes(15);
+    expect(prisma.socialPost.upsert.mock.calls[0][0].create).toMatchObject({ postedAt: new Date('2026-09-01T10:00:00Z'), likes: 0 });
+    expect(prisma.postOfferingLink.create).not.toHaveBeenCalled();
+  });
+
+  it('lists posts newest first, 10 per page, with the total', async () => {
+    const { service, prisma } = make();
+    prisma.postOfferingLink.findMany = jest.fn().mockResolvedValue([]);
+    prisma.dmSpotlight = { findMany: jest.fn().mockResolvedValue([]) };
+    prisma.commentReplyJob = { findMany: jest.fn().mockResolvedValue([]) };
+    prisma.socialPost.findMany.mockResolvedValue(
+      Array.from({ length: 23 }, (_, i) => ({
+        postId: `m${i}`,
+        platform: 'INSTAGRAM',
+        postedAt: new Date(Date.UTC(2026, 0, 1 + i)),
+        createdAt: new Date('2026-09-28T00:00:00Z'),
+        note: null,
+        source: 'META',
+      })),
+    );
+    prisma.businessProfile.findUnique.mockResolvedValue({ autoTagPosts: false });
+    const first = await service.listLinks('org', undefined, undefined, { page: 1 });
+    expect(first).toMatchObject({ total: 23, page: 1, limit: 10, autoTagPosts: false });
+    expect(first.posts.map((p: any) => p.postId).slice(0, 2)).toEqual(['m22', 'm21']);
+    const last = await service.listLinks('org', undefined, undefined, { page: 3, limit: 10 });
+    expect(last.posts.map((p: any) => p.postId)).toEqual(['m2', 'm1', 'm0']);
+    expect((await service.listLinks('org')).posts).toHaveLength(23);
   });
 
   it('does nothing for a post it already knows', async () => {

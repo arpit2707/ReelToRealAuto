@@ -33,6 +33,9 @@ export type ChannelPost = {
 
 const POST_LIMIT = 12;
 const COMMENT_LIMIT = 10;
+// Every post of a page, without comments, for the seller to tag by hand.
+const ALL_POSTS_PAGE = 50;
+export const ALL_POSTS_MAX = 300;
 
 // Posts are read live from the Graph API rather than stored: Meta is the source
 // of truth for captions, media URLs and counts, and nothing here needs history.
@@ -107,6 +110,70 @@ export class PostsService {
         `Meta did not return posts: ${err.message}`,
       );
     }
+  }
+
+  /**
+   * Every post of the page, newest first, without comments (Meta pages of 50,
+   * up to `max`), so the seller can pick posts by hand, not only the latest 12.
+   */
+  async allPosts(
+    orgId: string,
+    channelId: string,
+    max = ALL_POSTS_MAX,
+  ): Promise<ChannelPost[]> {
+    const { channel, token } = await this.channelFor(orgId, channelId);
+    const facebook = channel.platform === 'FACEBOOK';
+    const path = facebook
+      ? `/${channel.channelIdentifier}/posts`
+      : `/${channel.channelIdentifier}/media`;
+    const fields = facebook
+      ? 'id,message,story,created_time,full_picture,permalink_url,reactions.summary(true).limit(0),comments.limit(0).summary(true)'
+      : 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count';
+    const posts: ChannelPost[] = [];
+    let after: string | undefined;
+    do {
+      const json = await this.graphGet(
+        path,
+        {
+          fields,
+          limit: String(ALL_POSTS_PAGE),
+          ...(after ? { after } : {}),
+        },
+        token,
+      );
+      for (const p of json.data || []) {
+        posts.push(
+          facebook
+            ? {
+                id: String(p.id),
+                text: p.message || p.story || '',
+                mediaUrl: p.full_picture || null,
+                mediaType: p.full_picture ? 'IMAGE' : null,
+                permalink: p.permalink_url || null,
+                createdAt: p.created_time || null,
+                likes: p.reactions?.summary?.total_count ?? null,
+                commentsCount: p.comments?.summary?.total_count ?? null,
+                comments: [],
+              }
+            : {
+                id: String(p.id),
+                text: p.caption || '',
+                mediaUrl:
+                  p.media_type === 'VIDEO'
+                    ? p.thumbnail_url || null
+                    : p.media_url || null,
+                mediaType: p.media_type || null,
+                permalink: p.permalink || null,
+                createdAt: p.timestamp || null,
+                likes: p.like_count ?? null,
+                commentsCount: p.comments_count ?? null,
+                comments: [],
+              },
+        );
+      }
+      after = json.paging?.next ? json.paging?.cursors?.after : undefined;
+    } while (after && posts.length < max);
+    return posts.slice(0, max);
   }
 
   /** One post without its comments, for tagging a post the moment it is commented on. */
