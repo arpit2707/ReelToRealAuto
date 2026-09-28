@@ -83,11 +83,10 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
   // permission the app does not hold, so every name here was checked against
   // the live OAuth dialog and the use case's permissions table.
   //
-  // instagram_manage_comments is deliberately absent: unlike the others it has
-  // no Standard Access tier for this app, so it cannot be requested until App
-  // Review grants Advanced Access. Asking for it fails the entire dialog, which
-  // takes the Page permissions down with it. Add it via META_SCOPES_FACEBOOK
-  // once the review is approved.
+  // instagram_manage_comments is what makes Meta send Instagram comment
+  // webhooks; without it comments never reach us. It shows "Ready for testing"
+  // (Standard Access) on the live app since 2026-09-28. If Meta ever rejects the
+  // dialog with "Invalid Scopes", override the list with META_SCOPES_FACEBOOK.
   //
   // business_management is required alongside the Instagram permissions, which
   // come from the "Manage messaging & content on Instagram" use case
@@ -112,6 +111,7 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
         'business_management',
         'instagram_basic',
         'instagram_manage_messages',
+        'instagram_manage_comments',
         'instagram_content_publish',
       ].join(',');
     }
@@ -125,6 +125,7 @@ export class ChannelConnectService implements OnModuleInit, OnModuleDestroy {
       'business_management',
       'instagram_basic',
       'instagram_manage_messages',
+      'instagram_manage_comments',
     ].join(',');
   }
 
