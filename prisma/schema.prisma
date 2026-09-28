@@ -619,6 +619,10 @@ model SocialPost {
   mediaUrl  String?
   permalink String?
   note      String?
+  // When it was posted on Meta, and its last seen counts (newest first in the dashboard).
+  postedAt      DateTime?
+  likes         Int?
+  commentsCount Int?
   // META (found on the page) | DAILY_POST (published by us)
   source    String       @default("META")
   // When the AI last matched it against the catalog; null means not yet.
@@ -635,6 +639,7 @@ model SocialPost {
   updatedAt DateTime     @updatedAt
 
   @@unique([orgId, postId])
+  @@index([orgId, postedAt])
 }
 
 // One record per root (top-level) comment; replies under it join this record.

@@ -190,6 +190,8 @@ export class CatalogService {
       replyLanguage: input.replyLanguage ?? input.language,
       services: input.services ? [...new Set(input.services)] : undefined,
       offerType: input.offerType === undefined ? undefined : input.offerType || null,
+      autoTagPosts:
+        typeof input.autoTagPosts === 'boolean' ? input.autoTagPosts : undefined,
     };
     if (input.completeOnboarding) {
       const existing = await this.prisma.businessProfile.findUnique({

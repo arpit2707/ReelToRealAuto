@@ -24,6 +24,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // How often the scheduler checks which orgs are due; each org still runs once a day.
 const TICK_MS = 60 * 60 * 1000;
 const MAX_NOTE = 500;
+// Auto-match sends only this many of the newest posts to the AI per run.
+const AI_MATCH_NEWEST = 12;
+const MAX_PAGE_SIZE = 50;
 // WhatsApp "is this the item?" buttons on a fresh post's best AI tag.
 const TAG_YES_PREFIX = 'TAG_YES_';
 const TAG_NO_PREFIX = 'TAG_NO_';
@@ -135,8 +138,13 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Brings in every post of the connected pages (no AI), and when the seller
+   * keeps auto-match on, also matches the newest ones to the catalog. With
+   * auto-match off the seller tags posts and writes their context by hand.
+   */
   async run(orgId: string) {
-    const [channels, offeringCount] = await Promise.all([
+    const [channels, offeringCount, profile] = await Promise.all([
       this.prisma.channel.findMany({
         where: {
           orgId,
@@ -147,13 +155,16 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
         select: { id: true, platform: true },
       }),
       this.prisma.offering.count({ where: { orgId, isActive: true } }),
+      this.prisma.businessProfile.findUnique({
+        where: { orgId },
+        select: { autoTagPosts: true },
+      }),
     ]);
     if (!channels.length)
       throw new BadRequestException(
         'Connect an Instagram account or Facebook Page first',
       );
-    if (!offeringCount)
-      throw new BadRequestException('Add items to your catalog first');
+    const autoTag = profile?.autoTagPosts !== false && offeringCount > 0;
 
     const run = await this.prisma.postTagRun.create({ data: { orgId } });
     let seen = 0;
@@ -162,7 +173,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     for (const ch of channels) {
       let posts: ChannelPost[] = [];
       try {
-        posts = (await this.posts.listPosts(orgId, ch.id)).posts;
+        posts = await this.posts.allPosts(orgId, ch.id);
       } catch (err: any) {
         errors.push(`${ch.platform}: ${err.message}`);
         continue;
@@ -172,10 +183,13 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
         await this.spotlight
           .checkMissing(orgId, ch.id, posts.map((p) => p.id))
           .catch((e) => this.logger.warn(`Spotlight check for ${ch.id} failed: ${e.message}`));
-      for (const post of posts) {
+      for (const [i, post] of posts.entries()) {
         seen += 1;
         try {
-          suggested += await this.tagPost(orgId, ch, post);
+          // The AI only looks at the newest posts; older ones are just listed.
+          if (autoTag && i < AI_MATCH_NEWEST)
+            suggested += await this.tagPost(orgId, ch, post);
+          else await this.rememberPost(orgId, ch, post, null);
         } catch (err: any) {
           this.logger.warn(`Tagging post ${post.id} failed: ${err.message}`);
         }
@@ -224,6 +238,8 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
       return 0;
     }
 
+    // Listed first, so the seller sees the post even if the AI call fails.
+    await this.rememberPost(orgId, channel, post, null);
     const suggestions = await this.suggest(orgId, post);
     const created: Array<{ id: string; offeringId: string; confidence: number }> = [];
     for (const s of suggestions) {
@@ -437,6 +453,10 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
       caption: post.text?.slice(0, 2000) || null,
       mediaUrl: post.mediaUrl,
       permalink: post.permalink,
+      // A lookup that has no counts (a Facebook single post) keeps the last ones.
+      postedAt: validDate(post.createdAt) ?? undefined,
+      likes: post.likes ?? undefined,
+      commentsCount: post.commentsCount ?? undefined,
     };
     return this.prisma.socialPost.upsert({
       where: { orgId_postId: { orgId, postId: post.id } },
@@ -542,7 +562,17 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
 
   // ------------------------------------------------------------ review API
 
-  async listLinks(orgId: string, status?: string, ai?: string) {
+  /**
+   * Every known post with its tags and AI state, newest first. `ai` narrows it
+   * (review | on | off | untagged | needs_context); with `page` the result is
+   * one page of `limit` posts (default 10) plus the total.
+   */
+  async listLinks(
+    orgId: string,
+    status?: string,
+    ai?: string,
+    paging?: { page?: number; limit?: number },
+  ) {
     const links = await this.prisma.postOfferingLink.findMany({
       where: { orgId, ...(status ? { status } : {}) },
       include: {
@@ -558,7 +588,7 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
     const socials = await this.prisma.socialPost.findMany({
       where: { orgId },
       orderBy: { createdAt: 'desc' },
-      take: 200,
+      take: 1000,
     });
     const social = new Map(socials.map((s) => [s.postId, s]));
     const posts = new Map<string, any>();
@@ -569,8 +599,8 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
       caption: s.caption,
       mediaUrl: s.mediaUrl,
       permalink: s.permalink,
-      likes: null,
-      commentsCount: null,
+      likes: s.likes ?? null,
+      commentsCount: s.commentsCount ?? null,
       note: s.note,
       source: s.source,
       tags: [],
@@ -584,8 +614,8 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
         caption: l.caption ?? s?.caption ?? null,
         mediaUrl: l.mediaUrl ?? s?.mediaUrl ?? null,
         permalink: l.permalink ?? s?.permalink ?? null,
-        likes: l.likes,
-        commentsCount: l.commentsCount,
+        likes: l.likes ?? s?.likes ?? null,
+        commentsCount: l.commentsCount ?? s?.commentsCount ?? null,
         note: s?.note ?? null,
         source: s?.source ?? 'META',
         tags: [],
@@ -636,15 +666,37 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
         answeredCount: answeredCount.get(p.postId) || 0,
       };
     });
-    if (ai === 'on') list = list.filter((p) => p.aiOn);
+    // Newest post first; a post we never saw on Meta goes by when we stored it.
+    const when = (postId: string) => {
+      const sp = social.get(postId);
+      return (sp?.postedAt || sp?.createdAt)?.getTime() ?? 0;
+    };
+    list.sort((a, b) => when(b.postId) - when(a.postId));
+    if (ai === 'review')
+      list = list.filter((p) => p.tags.some((t: any) => t.status === 'AI_SUGGESTED'));
+    else if (ai === 'on') list = list.filter((p) => p.aiOn);
     else if (ai === 'off') list = list.filter((p) => !p.aiOn);
     else if (ai === 'untagged') list = list.filter((p) => !p.tags.length);
     else if (ai === 'needs_context') list = list.filter((p) => p.needsContext);
-    const lastRun = await this.prisma.postTagRun.findFirst({
-      where: { orgId },
-      orderBy: { createdAt: 'desc' },
-    });
-    return { posts: list, lastRun };
+    const [lastRun, profile] = await Promise.all([
+      this.prisma.postTagRun.findFirst({
+        where: { orgId },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.businessProfile.findUnique({
+        where: { orgId },
+        select: { autoTagPosts: true },
+      }),
+    ]);
+    const autoTagPosts = profile?.autoTagPosts !== false;
+    const total = list.length;
+    if (paging?.page) {
+      const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.floor(paging.limit || 10)));
+      const page = Math.max(1, Math.floor(paging.page));
+      list = list.slice((page - 1) * limit, page * limit);
+      return { posts: list, lastRun, autoTagPosts, total, page, limit };
+    }
+    return { posts: list, lastRun, autoTagPosts, total };
   }
 
   /**
@@ -823,6 +875,12 @@ export class PostTaggingService implements OnModuleInit, OnModuleDestroy {
         score: l.score,
       }));
   }
+}
+
+function validDate(v: string | null | undefined): Date | null {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 function isFresh(post: { createdAt: string | null }, now = new Date()): boolean {
