@@ -85,9 +85,39 @@ export class StoriesController {
       optionCount?: number;
       destinations?: string[];
       nicheKeywords?: string[];
+      flow?: string;
+      cadenceDays?: number;
+      maxPicks?: number;
+      brandColors?: string[];
+      brandThemes?: string[];
+      visualStyle?: string | null;
+      brandDirection?: string | null;
+      contentLanguage?: string | null;
+      avoidTopics?: string[];
     },
   ) {
     return this.stories.updateSettings(user.orgId, body || {});
+  }
+
+  /** A first brand kit read from the page's own posts, for the seller to review and save. */
+  @Post('brand-kit/suggest')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('OWNER', 'ADMIN')
+  suggestBrandKit(@CurrentUser() user: JwtPayload) {
+    return this.stories.suggestBrandKit(user.orgId);
+  }
+
+  /** Picks ideas from a round of text ideas; each becomes a post (drawn in the background). */
+  @Post('batches/:id/contexts')
+  @HttpCode(202)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('OWNER', 'ADMIN')
+  pickContexts(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() body: { picks?: Array<{ position: number; note?: string | null }> },
+  ) {
+    return this.stories.pickContextsFromDashboard(user.orgId, id, body?.picks || []);
   }
 
   @Get('batches')
@@ -110,7 +140,8 @@ export class StoriesController {
     @CurrentUser() user: JwtPayload,
     @Param('id') id: string,
     @Param('position', ParseIntPipe) position: number,
-    @Body() body: { when?: 'now' | 'tomorrow' | 'scheduled'; at?: string | null },
+    @Body()
+    body: { when?: 'now' | 'tomorrow' | 'scheduled'; at?: string | null; as?: 'POST' | 'STORY' | 'BOTH' | null },
   ) {
     return this.stories.pickFromDashboard(user.orgId, id, position, body || {});
   }

@@ -11,6 +11,7 @@ import {
   StoriesService,
   zonedDateTime,
 } from './stories.service';
+import { MediaStore } from './media-store';
 
 jest.mock('./story-image', () => ({
   toStoryJpeg: jest.fn(async (b: Buffer) => Buffer.concat([Buffer.from('jpg:'), b])),
@@ -29,6 +30,9 @@ const MERCHANT = '919876543210';
 // 2026-09-28 10:00 IST: after the 09:00 send time, before the 19:00 post time.
 const MORNING = new Date('2026-09-28T04:30:00Z');
 const NIGHT = new Date('2026-09-28T15:00:00Z'); // 20:30 IST
+
+const afterTimers: Array<() => void> = [];
+afterEach(() => afterTimers.splice(0).forEach((f) => f()));
 
 function makeService(settingsOver: any = {}) {
   const settings = {
@@ -151,7 +155,7 @@ function makeService(settingsOver: any = {}) {
       hashtags: ['#bridalmakeup', '#hdmakeup'],
     }),
   };
-  const service = new StoriesService(prisma, crypto, meta, gemini, keywords);
+  const service = new StoriesService(prisma, crypto, meta, gemini, keywords, new MediaStore());
   return { service, prisma, meta, gemini, keywords, settings };
 }
 
@@ -270,7 +274,7 @@ describe('StoriesService', () => {
         { orgId: 'done', sendTime: '08:00', org: { timezone: 'Asia/Kolkata' } },
       ]);
       prisma.storyBatch.findFirst.mockImplementation(async ({ where }: any) =>
-        where.orgId === 'done' && where.kind === 'DAILY' ? { id: 'x' } : null,
+        where.orgId === 'done' && where.kind?.in?.includes('DAILY') ? { id: 'x' } : null,
       );
       const generate = jest.spyOn(service, 'generateBatch').mockResolvedValue({} as any);
 
@@ -1174,6 +1178,9 @@ describe('content autopilot', () => {
     });
 
     it('"option 3 post karo" during an edit picks option 3', async () => {
+      // Before today's posting time, so the pick schedules instead of asking "now or tomorrow".
+      jest.useFakeTimers({ now: MORNING, doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'queueMicrotask'] });
+      afterTimers.push(() => jest.useRealTimers());
       const { service, prisma, gemini } = makeService();
       prisma.storyBatch.findFirst.mockResolvedValue(editing());
       prisma.storyBatch.findUnique.mockResolvedValue(openBatch({ options: [{ id: 'o3' }] }));

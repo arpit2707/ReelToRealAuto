@@ -6,11 +6,18 @@ import { StoriesController } from './stories.controller';
 import { StoriesService } from './stories.service';
 import { GeminiClient } from './gemini.client';
 import { KeywordResearchService } from './keyword-research.service';
+import { MediaStore } from './media-store';
 
 @Module({
   imports: [CryptoModule, MetaPublisherModule],
   controllers: [StoriesController],
-  providers: [StoriesService, GeminiClient, KeywordResearchService, RolesGuard],
+  providers: [
+    StoriesService,
+    GeminiClient,
+    KeywordResearchService,
+    MediaStore,
+    RolesGuard,
+  ],
   exports: [StoriesService, GeminiClient],
 })
 export class StoriesModule {}

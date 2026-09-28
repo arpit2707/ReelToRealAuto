@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { PrismaService } from '../../prisma/prisma.service';
 
 export type SemrushKeyword = {
   phrase: string;
@@ -15,6 +16,10 @@ export type KeywordResearch = { keywords: string[]; hashtags: string[] };
 @Injectable()
 export class KeywordResearchService {
   private readonly logger = new Logger(KeywordResearchService.name);
+
+  // With Prisma, one Apify run per hashtag per day serves every seller in that
+  // niche (TrendCache); without it (unit tests) every call goes to Apify.
+  constructor(@Optional() private readonly prisma?: PrismaService) {}
 
   async research(seed: string, database = 'in'): Promise<KeywordResearch> {
     const [semrush, apify] = await Promise.all([
@@ -50,6 +55,19 @@ export class KeywordResearchService {
   async apifyHashtags(seed: string): Promise<string[]> {
     const token = process.env.APIFY_TOKEN;
     if (!token) return [];
+    const key = `apify:${toHashtag(seed)}:${new Date().toISOString().slice(0, 10)}`;
+    const cached = await this.prisma?.trendCache.findUnique({ where: { key } }).catch(() => null);
+    if (cached) return cached.values;
+    const values = await this.fetchApifyHashtags(seed, token);
+    if (values.length) {
+      await this.prisma?.trendCache
+        .upsert({ where: { key }, create: { key, values }, update: { values } })
+        .catch((e) => this.logger.warn(`Trend cache write failed: ${e.message}`));
+    }
+    return values;
+  }
+
+  private async fetchApifyHashtags(seed: string, token: string): Promise<string[]> {
     const actor = process.env.APIFY_HASHTAG_ACTOR || 'apify~instagram-hashtag-scraper';
     const tag = toHashtag(seed).slice(1);
     const url = `https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items?timeout=120&maxItems=40`;

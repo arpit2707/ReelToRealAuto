@@ -29,6 +29,35 @@ export type BusinessContext = {
   forDate: string;
   // Today's researched keywords; each idea should target one of them.
   trendKeywords?: string[];
+  // The seller's brand kit: every idea, caption and image follows it.
+  brandKit?: BrandKit | null;
+  // What worked and what did not on the page's own posts.
+  insights?: PostInsights | null;
+  // Captions of the page's latest posts, so new ideas take a different angle.
+  pastPosts?: string[];
+};
+
+export type BrandKit = {
+  colors?: string[];
+  themes?: string[];
+  visualStyle?: string | null;
+  direction?: string | null;
+  language?: string | null;
+  avoid?: string[];
+};
+
+export type PostInsights = { summary: string; topTopics: string[]; weakTopics: string[] };
+
+export type PastPost = { caption: string; likes?: number | null; comments?: number | null; postedAt?: string | null };
+
+export type PostDraft = { title: string; caption: string; imagePrompt: string };
+
+export type BrandKitSuggestion = {
+  themes: string[];
+  colors: string[];
+  visualStyle: string;
+  language: string;
+  direction: string;
 };
 
 export type NicheContext = {
@@ -195,6 +224,131 @@ export class GeminiClient {
     };
   }
 
+  /**
+   * Turns a picked idea into the final post, folding in what the seller said
+   * when picking it ("red lehenga ke saath"). Without a note the idea is kept.
+   */
+  async refinePost(
+    idea: { title: string; idea: string; caption: string; imagePrompt: string; seedKeyword: string },
+    ctx: { brandName: string; brandKit?: BrandKit | null; note?: string | null },
+  ): Promise<PostDraft> {
+    const prompt = [
+      `You write Instagram posts for "${ctx.brandName}", an Indian small business.`,
+      brandKitLines(ctx.brandKit),
+      `The owner picked this idea: ${JSON.stringify({ title: idea.title, idea: idea.idea, caption: idea.caption })}`,
+      `Image prompt so far: ${idea.imagePrompt.slice(0, 1200)}`,
+      ctx.note
+        ? `The owner's instruction for this post (Hindi, Hinglish or English), which wins over the idea: ${ctx.note.slice(0, 500)}`
+        : '',
+      'Return:',
+      '- title: at most 24 characters, the headline lettered on the image',
+      `- caption: 1 to 3 short lines in the brand voice with a call to action, no hashtags; keep the focus on "${idea.seedKeyword}"`,
+      '- imagePrompt: a detailed prompt for an image model, with no text in the image, following the brand colours and style',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const r = await this.generateJson<Partial<PostDraft>>(prompt, {
+      type: 'OBJECT',
+      properties: { title: { type: 'STRING' }, caption: { type: 'STRING' }, imagePrompt: { type: 'STRING' } },
+      required: ['title', 'caption', 'imagePrompt'],
+    });
+    return {
+      title: String(r?.title || idea.title).trim().slice(0, 24),
+      caption: String(r?.caption || idea.caption).trim().slice(0, 1000),
+      imagePrompt: String(r?.imagePrompt || idea.imagePrompt).trim(),
+    };
+  }
+
+  /** What worked on the page: its own posts ranked by likes and comments. */
+  async analyzePosts(brandName: string, posts: PastPost[]): Promise<PostInsights> {
+    const lines = posts
+      .slice(0, 50)
+      .map(
+        (p, i) =>
+          `${i + 1}. [${p.postedAt ? p.postedAt.slice(0, 10) : '?'} | ${p.likes ?? '?'} likes | ${p.comments ?? '?'} comments] ` +
+          p.caption.replace(/\s+/g, ' ').slice(0, 280),
+      )
+      .join('\n');
+    const prompt = [
+      `You analyse the Instagram posts of "${brandName}", an Indian small business, to plan new posts.`,
+      `Their recent posts, newest first:\n${lines}`,
+      'Return:',
+      '- summary: 2 to 4 sentences on what the audience responds to (topics, formats, offers, tone) and what falls flat',
+      '- topTopics: up to 6 short topics that did best',
+      '- weakTopics: up to 4 short topics that did worst or are overused',
+    ].join('\n');
+    const r = await this.generateJson<Partial<PostInsights>>(prompt, {
+      type: 'OBJECT',
+      properties: {
+        summary: { type: 'STRING' },
+        topTopics: { type: 'ARRAY', items: { type: 'STRING' } },
+        weakTopics: { type: 'ARRAY', items: { type: 'STRING' } },
+      },
+      required: ['summary', 'topTopics', 'weakTopics'],
+    });
+    return {
+      summary: String(r?.summary || '').trim().slice(0, 1200),
+      topTopics: cleanList(r?.topTopics, 6),
+      weakTopics: cleanList(r?.weakTopics, 4),
+    };
+  }
+
+  /** A first brand kit from the page's own posts, for the seller to confirm. */
+  async suggestBrandKit(
+    brandName: string,
+    captions: string[],
+    images: Array<{ data: Buffer; mimeType: string }>,
+  ): Promise<BrandKitSuggestion> {
+    const prompt = [
+      `You are a brand designer for "${brandName}", an Indian small business on Instagram.`,
+      captions.length
+        ? `Captions of their recent posts:\n${captions
+            .slice(0, 20)
+            .map((c) => `- ${c.replace(/\s+/g, ' ').slice(0, 200)}`)
+            .join('\n')}`
+        : '',
+      images.length ? `${images.length} of their recent post images are attached.` : '',
+      'Describe the brand they already have so new posts look and sound the same. Return:',
+      '- themes: up to 4 short content themes',
+      '- colors: 2 to 4 dominant brand colours as #RRGGBB',
+      '- visualStyle: one sentence on the look (photo style, backgrounds, layout)',
+      '- language: the caption language, e.g. "Hinglish", "Hindi", "English"',
+      '- direction: 1 to 2 sentences of creative direction for new posts',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const parts: unknown[] = [{ text: prompt }];
+    for (const img of images.slice(0, 4)) {
+      parts.push({ inline_data: { mime_type: img.mimeType, data: img.data.toString('base64') } });
+    }
+    const json = await this.call(this.textModel(), {
+      contents: [{ role: 'user', parts }],
+      generationConfig: {
+        temperature: 0.2,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'OBJECT',
+          properties: {
+            themes: { type: 'ARRAY', items: { type: 'STRING' } },
+            colors: { type: 'ARRAY', items: { type: 'STRING' } },
+            visualStyle: { type: 'STRING' },
+            language: { type: 'STRING' },
+            direction: { type: 'STRING' },
+          },
+          required: ['themes', 'colors', 'visualStyle', 'language', 'direction'],
+        },
+      },
+    });
+    const r = JSON.parse(extractText(json)) as Partial<BrandKitSuggestion>;
+    return {
+      themes: cleanList(r?.themes, 4),
+      colors: cleanList(r?.colors, 4).filter((c) => /^#[0-9a-f]{6}$/i.test(c)),
+      visualStyle: String(r?.visualStyle || '').trim().slice(0, 200),
+      language: String(r?.language || '').trim().slice(0, 40),
+      direction: String(r?.direction || '').trim().slice(0, 500),
+    };
+  }
+
   /** Returns raw image bytes (usually PNG) for a vertical story image. */
   async generateImage(prompt: string): Promise<Buffer> {
     const body = {
@@ -307,7 +461,20 @@ export function buildIdeasPrompt(ctx: BusinessContext, count: number): string {
     trends.length
       ? `Trending keywords in this niche today, best first: ${trends.join('; ')}. Build each idea around a different one.`
       : '',
+    brandKitLines(ctx.brandKit),
+    ctx.insights?.summary
+      ? `What worked on this page before: ${ctx.insights.summary}` +
+        (ctx.insights.topTopics.length ? ` Best topics: ${ctx.insights.topTopics.join(', ')}.` : '') +
+        (ctx.insights.weakTopics.length ? ` Weak or overused: ${ctx.insights.weakTopics.join(', ')}.` : '')
+      : '',
     ctx.recentTitles.length ? `Avoid repeating these recent posts: ${ctx.recentTitles.join('; ')}` : '',
+    ctx.pastPosts?.length
+      ? `The page already posted these (captions); every idea must take a new angle, not repeat them:\n${ctx.pastPosts
+          .slice(0, 12)
+          .map((c) => `- ${c.replace(/\s+/g, ' ').slice(0, 120)}`)
+          .join('\n')}`
+      : '',
+    'Make the ideas different from each other: mix trend-led ideas, a product or offer, a new angle on what worked before, and one that invites comments (a question, poll or behind the scenes).',
     'For each idea return:',
     '- title: at most 24 characters, the headline lettered on the image',
     '- label: at most 30 characters naming why it is suggested, e.g. "Trending: hd bridal base"',
@@ -321,6 +488,37 @@ export function buildIdeasPrompt(ctx: BusinessContext, count: number): string {
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+/** The brand kit as prompt lines; empty when the seller has not set one. */
+export function brandKitLines(kit?: BrandKit | null): string {
+  if (!kit) return '';
+  return [
+    kit.colors?.length ? `Brand colours (use them in every image): ${kit.colors.join(', ')}` : '',
+    kit.themes?.length ? `Brand themes: ${kit.themes.join(', ')}` : '',
+    kit.visualStyle ? `Visual style: ${kit.visualStyle}` : '',
+    kit.language ? `Write captions in ${kit.language}.` : '',
+    kit.direction ? `Owner's creative direction: ${kit.direction}` : '',
+    kit.avoid?.length ? `Never use or mention: ${kit.avoid.join(', ')}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/** Appended to every image prompt so pictures keep the brand's look. */
+export function brandImageStyle(kit?: BrandKit | null): string {
+  if (!kit) return '';
+  const parts = [
+    kit.colors?.length ? `colour palette ${kit.colors.join(', ')}` : '',
+    kit.visualStyle ? kit.visualStyle : '',
+  ].filter(Boolean);
+  return parts.length ? `\nBrand look: ${parts.join('; ')}.` : '';
+}
+
+function cleanList(value: unknown, max: number): string[] {
+  return [...new Set((Array.isArray(value) ? value : []).map((v) => String(v).trim()).filter(Boolean))]
+    .map((v) => v.slice(0, 60))
+    .slice(0, max);
 }
 
 export function extractText(json: any): string {
