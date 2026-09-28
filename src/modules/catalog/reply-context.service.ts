@@ -15,6 +15,15 @@ export type GoalState = {
   // ISO time until which the AI stays quiet after handing the chat to a
   // person. Cleared by "Resume AI" in the inbox.
   handedOffUntil?: string;
+  // Set when the seller answers from the inbox: the AI steps back for 12h.
+  sellerPausedUntil?: string;
+  // Why the chat needs the seller (crisis, complaint, human_request,
+  // unresolved_query, missing_information, ai_unavailable, ...).
+  handoffReason?: string;
+  // When helplines were sent; the AI stays off until the seller resumes it.
+  crisisAt?: string;
+  // "We got your message" went out while the AI service was down.
+  aiDownNoticeAt?: string;
 };
 
 export type ContextOffering = {

@@ -11,6 +11,10 @@ import { MetaPublisherService } from '../meta-publisher/meta-publisher.service';
 import { ConversationService } from '../conversations/conversation.service';
 import { RealtimeService } from '../realtime/realtime.service';
 import type { JwtPayload } from '../auth/jwt';
+import { chatPaused } from '../catalog/reply-engine.service';
+
+// After the seller answers a chat themselves, the AI stays out of it this long.
+export const SELLER_REPLY_PAUSE_MS = 12 * 60 * 60 * 1000;
 
 @Injectable()
 export class InboxService {
@@ -91,7 +95,15 @@ export class InboxService {
     const goalState = {
       ...((conversation.goalState as Record<string, unknown>) || {}),
     };
-    delete goalState.handedOffUntil;
+    // Resuming clears every reason the AI was quiet, a crisis included.
+    for (const key of [
+      'handedOffUntil',
+      'sellerPausedUntil',
+      'handoffReason',
+      'crisisAt',
+      'aiDownNoticeAt',
+    ])
+      delete goalState[key];
     const updated = await this.prisma.conversation.update({
       where: { id: conversation.id },
       data: {
@@ -231,12 +243,29 @@ export class InboxService {
       text,
       'HUMAN',
     );
+    // The seller is talking to this customer now: the AI steps back for a
+    // while so the two do not answer over each other. A soft "team will
+    // confirm" flag is settled by the seller's own answer.
+    const goalState: Record<string, unknown> = {
+      ...((conversation.goalState as Record<string, unknown>) || {}),
+      sellerPausedUntil: new Date(Date.now() + SELLER_REPLY_PAUSE_MS).toISOString(),
+    };
+    if (goalState.handoffReason && goalState.handoffReason !== 'crisis')
+      delete goalState.handoffReason;
+    await this.prisma.conversation
+      .update({
+        where: { id: conversation.id },
+        data: { goalState: goalState as Prisma.InputJsonValue },
+      })
+      .catch(() => undefined);
+    this.realtime.inboxChanged(user.orgId, {
+      kind: 'conversation',
+      conversationId: conversation.id,
+    });
     return { ok: true };
   }
 }
 
 function aiPaused(c: { aiEnabled: boolean; goalState: unknown }): boolean {
-  const until = (c.goalState as { handedOffUntil?: string } | null)
-    ?.handedOffUntil;
-  return !c.aiEnabled || Boolean(until && new Date(until) > new Date());
+  return chatPaused(c);
 }

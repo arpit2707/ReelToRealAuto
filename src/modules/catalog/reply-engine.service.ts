@@ -9,6 +9,7 @@ import { ReplyContextService, type GoalState } from './reply-context.service';
 import { LeadsService } from './leads.service';
 import { PostTaggingService } from './post-tagging.service';
 import { unknownPrices } from './price-guard';
+import { CRISIS_PUBLIC, crisisReply, isCrisis, receivedReply } from './crisis';
 import {
   replyBlockedReason,
   automationBlock,
@@ -50,12 +51,28 @@ const HANDOFF_PAUSE_MS = 24 * 60 * 60 * 1000;
 // Only these hand the chat to a person for a day. Anything else the AI could
 // not answer (a price not in the catalog, a model hiccup) gets the "team will
 // reply" message, but the next customer message is answered normally again.
-const PAUSING_REASONS = [
+// A crisis turns the chat's AI off until the seller turns it back on.
+export const PAUSING_REASONS = [
   'human_request',
   'complaint',
   'order_support',
   'purchase_assistance',
+  'unresolved_query',
+  'crisis',
 ];
+
+/** True while the AI must stay quiet in this chat. */
+export function chatPaused(
+  convo: { aiEnabled: boolean; goalState: unknown } | null | undefined,
+  now = new Date(),
+): boolean {
+  if (!convo) return false;
+  const s = (convo.goalState as GoalState | null) || {};
+  const future = (iso?: string) => Boolean(iso && new Date(iso) > now);
+  return (
+    !convo.aiEnabled || future(s.handedOffUntil) || future(s.sellerPausedUntil)
+  );
+}
 
 const SAFE_DM =
   'Thank you! Iski exact price aur details hamari team aapko thodi der me bhej degi.';
@@ -126,21 +143,23 @@ export class ReplyEngineService {
       return null;
     }
 
-    if (req.conversationId) {
-      const convo = await this.prisma.conversation.findUnique({
-        where: { id: req.conversationId },
-        select: { aiEnabled: true, goalState: true },
-      });
-      // A seller who turned the AI off, or a chat just handed to a person,
-      // gets no automatic answers. A hand-off pauses for a day at most, so a
-      // chat nobody picked up does not stay silent forever.
-      const until = (convo?.goalState as GoalState | null)?.handedOffUntil;
-      if (
-        convo &&
-        (!convo.aiEnabled || (until && new Date(until) > new Date()))
-      )
-        return null;
-    }
+    const convo = req.conversationId
+      ? await this.prisma.conversation.findUnique({
+          where: { id: req.conversationId },
+          select: { aiEnabled: true, goalState: true },
+        })
+      : null;
+    const state = ((convo?.goalState as GoalState | null) || {}) as GoalState;
+
+    // Safety before everything else, even a paused chat or a post with the AI
+    // off: helplines once, then the chat waits for the seller.
+    if (isCrisis(req.text)) return this.crisis(req, convo, state, isPreview);
+
+    // A seller who turned the AI off, a chat just handed to a person, or one
+    // the seller answered themselves gets no automatic answers. Pauses expire
+    // (a day for a hand-off, 12 hours after a seller reply), so a chat nobody
+    // picked up does not stay silent forever.
+    if (chatPaused(convo)) return null;
 
     if (!isPreview) await this.ensurePostContext(req);
 
@@ -218,6 +237,33 @@ export class ReplyEngineService {
       outcome.public_reply = req.eventType === 'comment' ? SAFE_PUBLIC : null;
     }
 
+    if (outcome.intent === 'ai_unavailable') {
+      // One "we got your message" per outage, only in a DM chat; comments
+      // stay unanswered rather than getting a public line with nothing behind it.
+      const notify =
+        req.eventType === 'dm' && Boolean(req.conversationId) && !state.aiDownNoticeAt;
+      outcome.private_dm = notify ? receivedReply(req.text) : null;
+      outcome.public_reply = null;
+      outcome.action = 'HANDOFF';
+      outcome.handoff_reason = 'ai_unavailable';
+    }
+
+    // The same "team will confirm" line twice in a row reads like a stuck bot.
+    const soft =
+      outcome.action === 'HANDOFF' &&
+      !PAUSING_REASONS.includes(outcome.handoff_reason || '');
+    const lastBusiness = [...ctx.recent_messages]
+      .reverse()
+      .find((m) => m.from === 'business');
+    if (
+      soft &&
+      outcome.private_dm &&
+      lastBusiness &&
+      lastBusiness.text === outcome.private_dm.slice(0, 300)
+    ) {
+      outcome.private_dm = null;
+    }
+
     if (req.conversationId) {
       await this.remember(
         req,
@@ -228,6 +274,48 @@ export class ReplyEngineService {
       );
     }
     return outcome;
+  }
+
+  private async crisis(
+    req: ReplyRequest,
+    convo: { aiEnabled: boolean; goalState: unknown } | null,
+    state: GoalState,
+    isPreview: boolean,
+  ): Promise<ReplyOutcome | null> {
+    // Once per chat: after the helpline the AI stays off until the seller
+    // switches it back on (which clears crisisAt).
+    if (convo && state.crisisAt && !convo.aiEnabled) return null;
+    this.logger.warn(
+      `Crisis message for org ${req.orgId} on ${req.platform} ${req.eventType}; sending helplines and pausing the AI`,
+    );
+    if (req.conversationId && !isPreview) {
+      await this.prisma.conversation
+        .update({
+          where: { id: req.conversationId },
+          data: {
+            aiEnabled: false,
+            goalState: {
+              ...state,
+              handoffReason: 'crisis',
+              crisisAt: new Date().toISOString(),
+            } as Prisma.InputJsonValue,
+          },
+        })
+        .catch((e) =>
+          this.logger.error(`Could not pause the chat after a crisis message: ${e.message}`),
+        );
+    }
+    return {
+      public_reply: req.eventType === 'comment' ? CRISIS_PUBLIC : null,
+      private_dm: crisisReply(req.text),
+      intent: 'crisis',
+      sentiment: 'negative',
+      requires_human_attention: true,
+      handoff_reason: 'crisis',
+      action: 'HANDOFF',
+      offering_ids: [],
+      guarded: false,
+    };
   }
 
   private async remember(
@@ -250,6 +338,19 @@ export class ReplyEngineService {
         ? outcome.offering_ids
         : previous.offeringIds,
       fields: { ...(previous.fields || {}), ...collected },
+      // Shown as "Needs you" in the inbox until the seller replies or resumes.
+      ...(outcome.action === 'HANDOFF'
+        ? {
+            handoffReason:
+              outcome.handoff_reason ||
+              (outcome.guarded ? 'price_blocked' : 'missing_information'),
+          }
+        : {}),
+      aiDownNoticeAt:
+        outcome.intent === 'ai_unavailable'
+          ? previous.aiDownNoticeAt ||
+            (outcome.private_dm ? new Date().toISOString() : undefined)
+          : undefined,
       ...(outcome.action === 'HANDOFF' &&
       !outcome.guarded &&
       PAUSING_REASONS.includes(outcome.handoff_reason || '')
