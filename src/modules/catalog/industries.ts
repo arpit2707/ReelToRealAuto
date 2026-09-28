@@ -276,7 +276,9 @@ const PRODUCT_INDUSTRIES = ['APPAREL', 'FOOTWEAR', 'FOOD'];
 const SERVICE_INDUSTRIES = ['BEAUTY_SERVICE', 'HOTEL', 'TRAVEL', 'REAL_ESTATE'];
 
 /** What a business sells when the seller has not said (matches the backfill). */
-export function defaultOfferType(industry: string | null | undefined): OfferType {
+export function defaultOfferType(
+  industry: string | null | undefined,
+): OfferType {
   if (PRODUCT_INDUSTRIES.includes(industry || '')) return 'PRODUCTS';
   if (SERVICE_INDUSTRIES.includes(industry || '')) return 'SERVICES';
   return 'BOTH';

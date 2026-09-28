@@ -12,7 +12,10 @@ import { ConversationService } from '../conversations/conversation.service';
 import { RealtimeService } from '../realtime/realtime.service';
 import type { JwtPayload } from '../auth/jwt';
 import { chatPaused, PAUSING_REASONS } from '../catalog/reply-engine.service';
-import { POST_MEMORY_MS, type GoalState } from '../catalog/reply-context.service';
+import {
+  POST_MEMORY_MS,
+  type GoalState,
+} from '../catalog/reply-context.service';
 import { priceLabel } from '../catalog/industries';
 
 // After the seller answers a chat themselves, the AI stays out of it this long.
@@ -114,10 +117,16 @@ export class InboxService {
     }>,
   ) {
     const now = Date.now();
-    const picked = new Map<string, { postId: string; kind: string | null; platform: string | null }>();
+    const picked = new Map<
+      string,
+      { postId: string; kind: string | null; platform: string | null }
+    >();
     for (const c of rows) {
       const s = (c.goalState as GoalState | null) || {};
-      const fresh = s.postId && s.postAt && now - new Date(s.postAt).getTime() < POST_MEMORY_MS;
+      const fresh =
+        s.postId &&
+        s.postAt &&
+        now - new Date(s.postAt).getTime() < POST_MEMORY_MS;
       const postId = fresh ? s.postId : c.sourcePostId;
       if (postId)
         picked.set(c.id, {
@@ -131,7 +140,13 @@ export class InboxService {
     const [posts, links] = await Promise.all([
       this.prisma.socialPost.findMany({
         where: { orgId, postId: { in: ids } },
-        select: { postId: true, caption: true, mediaUrl: true, permalink: true, platform: true },
+        select: {
+          postId: true,
+          caption: true,
+          mediaUrl: true,
+          permalink: true,
+          platform: true,
+        },
       }),
       this.prisma.postOfferingLink.findMany({
         where: { orgId, postId: { in: ids }, status: 'SELLER_CONFIRMED' },
@@ -168,7 +183,11 @@ export class InboxService {
         permalink: sp?.permalink || own[0]?.permalink || null,
         items: own
           .filter((l) => l.offering?.isActive)
-          .map((l) => ({ id: l.offering.id, title: l.offering.title, price: priceLabel(l.offering) })),
+          .map((l) => ({
+            id: l.offering.id,
+            title: l.offering.title,
+            price: priceLabel(l.offering),
+          })),
       });
     }
     return out;
@@ -232,8 +251,14 @@ export class InboxService {
     });
     return messages.map((m) => ({
       // A public comment (or our public reply to one), else a DM.
-      kind: m.type === 'COMMENT' || (m.payload as { kind?: string } | null)?.kind === 'comment' ? 'comment' : 'dm',
-      postId: ((m.payload as { postId?: string } | null)?.postId as string | undefined) || null,
+      kind:
+        m.type === 'COMMENT' ||
+        (m.payload as { kind?: string } | null)?.kind === 'comment'
+          ? 'comment'
+          : 'dm',
+      postId:
+        ((m.payload as { postId?: string } | null)?.postId as
+          string | undefined) || null,
       from:
         m.direction === 'INBOUND'
           ? 'customer'
@@ -339,7 +364,9 @@ export class InboxService {
     // confirm" flag is settled by the seller's own answer.
     const goalState: Record<string, unknown> = {
       ...((conversation.goalState as Record<string, unknown>) || {}),
-      sellerPausedUntil: new Date(Date.now() + SELLER_REPLY_PAUSE_MS).toISOString(),
+      sellerPausedUntil: new Date(
+        Date.now() + SELLER_REPLY_PAUSE_MS,
+      ).toISOString(),
     };
     if (goalState.handoffReason && goalState.handoffReason !== 'crisis')
       delete goalState.handoffReason;

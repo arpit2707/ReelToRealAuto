@@ -16,11 +16,16 @@ describe('offer type', () => {
   it('validates the page override and keeps categories tidy', async () => {
     const prisma: any = {
       channel: { findFirst: jest.fn().mockResolvedValue({ id: 'ch1' }) },
-      pageProfile: { upsert: jest.fn(async ({ create }) => create), deleteMany: jest.fn() },
+      pageProfile: {
+        upsert: jest.fn(async ({ create }) => create),
+        deleteMany: jest.fn(),
+      },
       offering: { count: jest.fn() },
     };
     const svc = new CatalogService(prisma, {} as any);
-    await expect(svc.savePageProfile('o', 'ch1', { offerType: 'NOPE' })).rejects.toThrow(BadRequestException);
+    await expect(
+      svc.savePageProfile('o', 'ch1', { offerType: 'NOPE' }),
+    ).rejects.toThrow(BadRequestException);
     const saved: any = await svc.savePageProfile('o', 'ch1', {
       offerType: 'BOTH',
       categories: [' Bridal makeup ', 'Bridal makeup', '', 'Lehenga'],
@@ -32,28 +37,46 @@ describe('offer type', () => {
   it('fills the offer type from the industry when setup finishes without one', async () => {
     const prisma: any = {
       businessProfile: {
-        findUnique: jest.fn().mockResolvedValue({ industry: 'HOTEL', description: 'Boutique hotel in Rishikesh by the Ganga', offerType: null }),
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({
+            industry: 'HOTEL',
+            description: 'Boutique hotel in Rishikesh by the Ganga',
+            offerType: null,
+          }),
         upsert: jest.fn().mockResolvedValue({}),
       },
     };
     const svc = new CatalogService(prisma, {} as any);
     await svc.saveProfile('o', { completeOnboarding: true });
-    expect(prisma.businessProfile.upsert.mock.calls[0][0].update.offerType).toBe('SERVICES');
+    expect(
+      prisma.businessProfile.upsert.mock.calls[0][0].update.offerType,
+    ).toBe('SERVICES');
   });
 });
 
 describe('discovery context', () => {
   function build(page: any, offerings: any[], goalState: any = {}) {
     const prisma: any = {
-      businessProfile: { findUnique: jest.fn().mockResolvedValue({ industry: 'OTHER', offerType: null }) },
+      businessProfile: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ industry: 'OTHER', offerType: null }),
+      },
       conversation: { findUnique: jest.fn().mockResolvedValue({ goalState }) },
       pageProfile: { findFirst: jest.fn().mockResolvedValue(page) },
       socialPost: { findUnique: jest.fn() },
-      postOfferingLink: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+      postOfferingLink: {
+        findFirst: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
       offering: {
         findMany: jest.fn(async ({ where, select }: any) => {
           if (select?.type && !select?.title) return offerings; // overview query
-          if (where?.id?.in) return offerings.filter((o) => where.id.in.includes(o.id)).map((o) => ({ ...o, variants: [], components: [] }));
+          if (where?.id?.in)
+            return offerings
+              .filter((o) => where.id.in.includes(o.id))
+              .map((o) => ({ ...o, variants: [], components: [] }));
           return []; // search finds nothing for "hi"
         }),
       },
@@ -62,12 +85,35 @@ describe('discovery context', () => {
     return new ReplyContextService(prisma, { availability: jest.fn() } as any);
   }
   const items = [
-    { id: 'p1', type: 'PRODUCT', title: 'Lehenga', priceMode: 'FIXED', priceMin: 9999, priceMax: null, currency: 'INR' },
-    { id: 's1', type: 'SERVICE', title: 'Bridal makeup', priceMode: 'STARTING_FROM', priceMin: 18000, priceMax: null, currency: 'INR' },
+    {
+      id: 'p1',
+      type: 'PRODUCT',
+      title: 'Lehenga',
+      priceMode: 'FIXED',
+      priceMin: 9999,
+      priceMax: null,
+      currency: 'INR',
+    },
+    {
+      id: 's1',
+      type: 'SERVICE',
+      title: 'Bridal makeup',
+      priceMode: 'STARTING_FROM',
+      priceMin: 18000,
+      priceMax: null,
+      currency: 'INR',
+    },
   ];
 
   it('a plain "hi" gets overview items, the page offer type and categories', async () => {
-    const ctx = await build({ offerType: 'BOTH', categories: ['Bridal makeup', 'Lehenga'], offeringIds: [] }, items).build({
+    const ctx = await build(
+      {
+        offerType: 'BOTH',
+        categories: ['Bridal makeup', 'Lehenga'],
+        offeringIds: [],
+      },
+      items,
+    ).build({
       orgId: 'o',
       text: 'hi',
       conversationId: 'c',
@@ -82,9 +128,16 @@ describe('discovery context', () => {
   });
 
   it('a services page, or a customer who asked for services, sees services only', async () => {
-    const svc = await build({ offerType: 'SERVICES', categories: [], offeringIds: [] }, items).build({ orgId: 'o', text: 'hi', channelId: 'ch1' });
+    const svc = await build(
+      { offerType: 'SERVICES', categories: [], offeringIds: [] },
+      items,
+    ).build({ orgId: 'o', text: 'hi', channelId: 'ch1' });
     expect(svc.offerings.map((o) => o.id)).toEqual(['s1']);
-    const chose = await build({ offerType: 'BOTH', categories: [], offeringIds: [] }, items, { offeringType: 'PRODUCTS' }).build({
+    const chose = await build(
+      { offerType: 'BOTH', categories: [], offeringIds: [] },
+      items,
+      { offeringType: 'PRODUCTS' },
+    ).build({
       orgId: 'o',
       text: 'hi',
       conversationId: 'c',
@@ -96,8 +149,12 @@ describe('discovery context', () => {
 
 describe('conversation stage', () => {
   it('moves forward only', () => {
-    expect(nextStage(undefined, { action: 'ANSWER', offering_ids: [] }, false)).toBe('DISCOVER');
-    expect(nextStage('DISCOVER', { action: 'ANSWER', offering_ids: ['o1'] }, false)).toBe('QUOTE');
+    expect(
+      nextStage(undefined, { action: 'ANSWER', offering_ids: [] }, false),
+    ).toBe('DISCOVER');
+    expect(
+      nextStage('DISCOVER', { action: 'ANSWER', offering_ids: ['o1'] }, false),
+    ).toBe('QUOTE');
     expect(nextStage('QUOTE', { action: 'ASK_FIELD' }, false)).toBe('COLLECT');
     expect(nextStage('COLLECT', { action: 'HANDOFF' }, true)).toBe('COLLECT');
     expect(nextStage('COLLECT', { action: 'CREATE_LEAD' }, true)).toBe('DONE');

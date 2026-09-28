@@ -54,7 +54,8 @@ export function spotlightStatus(
   if (row.missingAt) return 'POST_MISSING';
   if (!input.aiOn) return 'POST_AI_OFF';
   if (row.endsAt && row.endsAt.getTime() <= now.getTime()) return 'EXPIRED';
-  if (row.startsAt && row.startsAt.getTime() > now.getTime()) return 'SCHEDULED';
+  if (row.startsAt && row.startsAt.getTime() > now.getTime())
+    return 'SCHEDULED';
   // Still shown, minus the inactive item; the dashboard warns.
   if (input.inactiveItems) return 'ITEM_INACTIVE';
   return 'ACTIVE';
@@ -80,7 +81,11 @@ export class DmSpotlightService {
 
   private async channel(orgId: string, channelId: string) {
     const channel = await this.prisma.channel.findFirst({
-      where: { id: channelId, orgId, platform: { in: ['INSTAGRAM', 'FACEBOOK'] } },
+      where: {
+        id: channelId,
+        orgId,
+        platform: { in: ['INSTAGRAM', 'FACEBOOK'] },
+      },
       select: { id: true, platform: true },
     });
     if (!channel) throw new NotFoundException('Page not found');
@@ -109,7 +114,13 @@ export class DmSpotlightService {
     const [socials, links, on] = await Promise.all([
       this.prisma.socialPost.findMany({
         where: { orgId, postId: { in: ids } },
-        select: { postId: true, caption: true, mediaUrl: true, permalink: true, note: true },
+        select: {
+          postId: true,
+          caption: true,
+          mediaUrl: true,
+          permalink: true,
+          note: true,
+        },
       }),
       this.prisma.postOfferingLink.findMany({
         where: { orgId, postId: { in: ids }, status: 'SELLER_CONFIRMED' },
@@ -125,10 +136,15 @@ export class DmSpotlightService {
       const sp = social.get(r.postId);
       const items = links
         .filter((l) => l.postId === r.postId && l.offering)
-        .map((l) => l.offering as { id: string; title: string; isActive: boolean });
+        .map(
+          (l) => l.offering as { id: string; title: string; isActive: boolean },
+        );
       const status = spotlightStatus(
         r,
-        { aiOn: on.has(r.postId), inactiveItems: items.filter((i) => !i.isActive).length },
+        {
+          aiOn: on.has(r.postId),
+          inactiveItems: items.filter((i) => !i.isActive).length,
+        },
         now,
       );
       return {
@@ -141,7 +157,11 @@ export class DmSpotlightService {
         note: sp?.note || null,
         mediaUrl: sp?.mediaUrl || null,
         permalink: sp?.permalink || null,
-        items: items.map((i) => ({ id: i.id, title: i.title, isActive: i.isActive })),
+        items: items.map((i) => ({
+          id: i.id,
+          title: i.title,
+          isActive: i.isActive,
+        })),
         status,
         shown: SHOWN.includes(status),
       };
@@ -155,7 +175,8 @@ export class DmSpotlightService {
       posts,
       max: MAX_SPOTLIGHT,
       // Edge case: nothing is shown, so plain DMs use only the page context.
-      warning: posts.length && !posts.some((p) => p.shown) ? 'none_active' : null,
+      warning:
+        posts.length && !posts.some((p) => p.shown) ? 'none_active' : null,
     };
   }
 
@@ -164,9 +185,12 @@ export class DmSpotlightService {
     const channel = await this.channel(orgId, channelId);
     const list = Array.isArray(input) ? input : [];
     if (list.length > MAX_SPOTLIGHT)
-      throw new BadRequestException(`At most ${MAX_SPOTLIGHT} posts can be in the Spotlight`);
+      throw new BadRequestException(
+        `At most ${MAX_SPOTLIGHT} posts can be in the Spotlight`,
+      );
     const ids = list.map((p) => String(p?.postId || '').trim());
-    if (ids.some((id) => !id)) throw new BadRequestException('Every Spotlight entry needs a postId');
+    if (ids.some((id) => !id))
+      throw new BadRequestException('Every Spotlight entry needs a postId');
     if (new Set(ids).size !== ids.length)
       throw new BadRequestException('A post can be in the Spotlight only once');
 
@@ -182,14 +206,21 @@ export class DmSpotlightService {
       const postId = ids[position];
       const sp = social.get(postId);
       if (!sp) throw new BadRequestException(`Post ${postId} is not known yet`);
-      const samePage = sp.channelId ? sp.channelId === channel.id : sp.platform === channel.platform;
-      if (!samePage) throw new BadRequestException(`Post ${postId} belongs to another page`);
+      const samePage = sp.channelId
+        ? sp.channelId === channel.id
+        : sp.platform === channel.platform;
+      if (!samePage)
+        throw new BadRequestException(`Post ${postId} belongs to another page`);
       if (!on.has(postId))
-        throw new BadRequestException(`Switch the AI on for post ${postId} before adding it to the Spotlight`);
+        throw new BadRequestException(
+          `Switch the AI on for post ${postId} before adding it to the Spotlight`,
+        );
       const startsAt = toDate(p.startsAt, 'start');
       const endsAt = toDate(p.endsAt, 'end');
       if (startsAt && endsAt && endsAt.getTime() <= startsAt.getTime())
-        throw new BadRequestException('The end date must be after the start date');
+        throw new BadRequestException(
+          'The end date must be after the start date',
+        );
       return {
         orgId,
         channelId: channel.id,
@@ -202,14 +233,20 @@ export class DmSpotlightService {
     });
 
     await this.prisma.$transaction([
-      this.prisma.dmSpotlight.deleteMany({ where: { orgId, channelId: channel.id } }),
+      this.prisma.dmSpotlight.deleteMany({
+        where: { orgId, channelId: channel.id },
+      }),
       ...(data.length ? [this.prisma.dmSpotlight.createMany({ data })] : []),
     ]);
     return this.list(orgId, channelId);
   }
 
   /** Shown posts for a plain DM on this page (AI-on, in schedule, max 5). */
-  async forDm(orgId: string, channelId: string, now = new Date()): Promise<SpotlightForAi[]> {
+  async forDm(
+    orgId: string,
+    channelId: string,
+    now = new Date(),
+  ): Promise<SpotlightForAi[]> {
     const rows = await this.rows(orgId, channelId);
     const posts = await this.describe(orgId, rows, now);
     return posts
@@ -241,7 +278,12 @@ export class DmSpotlightService {
           await this.posts.getPost(orgId, channelId, r.postId);
         } catch (e: any) {
           // Only Meta's "does not exist" counts; a network error changes nothing.
-          if (!/does not exist|cannot be loaded|unsupported get request/i.test(String(e?.message))) continue;
+          if (
+            !/does not exist|cannot be loaded|unsupported get request/i.test(
+              String(e?.message),
+            )
+          )
+            continue;
           gone = true;
         }
       }
@@ -252,7 +294,10 @@ export class DmSpotlightService {
       });
       if (gone) missing += 1;
     }
-    if (missing) this.logger.log(`${missing} Spotlight post(s) of ${channelId} no longer exist on Meta`);
+    if (missing)
+      this.logger.log(
+        `${missing} Spotlight post(s) of ${channelId} no longer exist on Meta`,
+      );
     return missing;
   }
 }
@@ -260,6 +305,7 @@ export class DmSpotlightService {
 function toDate(v: string | null | undefined, which: string): Date | null {
   if (!v) return null;
   const d = new Date(v);
-  if (Number.isNaN(d.getTime())) throw new BadRequestException(`Invalid ${which} date`);
+  if (Number.isNaN(d.getTime()))
+    throw new BadRequestException(`Invalid ${which} date`);
   return d;
 }

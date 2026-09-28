@@ -84,13 +84,11 @@ describe('Instagram DMs about a post', () => {
       markSource: jest.fn().mockResolvedValue(undefined),
     };
     const replies: any = {
-      reply: jest
-        .fn()
-        .mockResolvedValue({
-          private_dm: 'Haan',
-          offering_ids: [],
-          action: 'ANSWER',
-        }),
+      reply: jest.fn().mockResolvedValue({
+        private_dm: 'Haan',
+        offering_ids: [],
+        action: 'ANSWER',
+      }),
     };
     const meta: any = { sendPrivateDm: jest.fn().mockResolvedValue(true) };
     const gate: any = { isPostAiOn: jest.fn().mockResolvedValue(postOn) };
